@@ -10,6 +10,8 @@ defmodule Lasso.ProfileChainSupervisor do
   use DynamicSupervisor
   require Logger
 
+  alias Lasso.Core.Support.DynamicSupervisorCall
+
   ## Client API
 
   @spec start_link(keyword()) :: Supervisor.on_start()
@@ -30,7 +32,7 @@ defmodule Lasso.ProfileChainSupervisor do
       when is_binary(profile_id) and is_integer(chain_id) and chain_id > 0 do
     spec = {Lasso.RPC.ChainSupervisor, {profile_id, chain_id, chain_config}}
 
-    case DynamicSupervisor.start_child(__MODULE__, spec) do
+    case DynamicSupervisorCall.start_child(__MODULE__, spec) do
       {:ok, pid} ->
         Logger.info(
           "Started chain supervisor",
@@ -41,6 +43,9 @@ defmodule Lasso.ProfileChainSupervisor do
 
       {:error, {:already_started, pid}} ->
         {:ok, pid}
+
+      {:error, {:supervisor_exit, _reason}} = error ->
+        error
 
       {:error, reason} = error ->
         Logger.error(
@@ -58,7 +63,7 @@ defmodule Lasso.ProfileChainSupervisor do
 
   This gracefully terminates the chain supervisor and all its children.
   """
-  @spec stop_profile_chain(String.t(), pos_integer()) :: :ok
+  @spec stop_profile_chain(String.t(), pos_integer()) :: :ok | {:error, term()}
   def stop_profile_chain(profile_id, chain_id)
       when is_binary(profile_id) and is_integer(chain_id) and chain_id > 0 do
     case GenServer.whereis(chain_supervisor_via(profile_id, chain_id)) do
@@ -66,7 +71,7 @@ defmodule Lasso.ProfileChainSupervisor do
         :ok
 
       pid ->
-        case DynamicSupervisor.terminate_child(__MODULE__, pid) do
+        case DynamicSupervisorCall.terminate_child(__MODULE__, pid) do
           :ok ->
             Logger.info(
               "Stopped chain supervisor",
@@ -77,6 +82,9 @@ defmodule Lasso.ProfileChainSupervisor do
 
           {:error, :not_found} ->
             :ok
+
+          {:error, {:supervisor_exit, _reason}} = error ->
+            error
 
           {:error, reason} ->
             Logger.warning(

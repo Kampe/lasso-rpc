@@ -9,6 +9,7 @@ defmodule Lasso.BlockSync.Supervisor do
   require Logger
 
   alias Lasso.BlockSync.Worker
+  alias Lasso.Core.Support.DynamicSupervisorCall
 
   @dynamic_supervisor Lasso.BlockSync.DynamicSupervisor
 
@@ -17,12 +18,15 @@ defmodule Lasso.BlockSync.Supervisor do
       when is_integer(chain_id) and chain_id > 0 and is_binary(instance_id) do
     spec = {Worker, {chain_id, instance_id}}
 
-    case DynamicSupervisor.start_child(@dynamic_supervisor, spec) do
+    case DynamicSupervisorCall.start_child(@dynamic_supervisor, spec) do
       {:ok, pid} ->
         {:ok, pid}
 
       {:error, {:already_started, pid}} ->
         {:ok, pid}
+
+      {:error, {:supervisor_exit, _reason}} = error ->
+        error
 
       {:error, reason} ->
         Logger.warning("Failed to start BlockSync worker",
@@ -43,7 +47,7 @@ defmodule Lasso.BlockSync.Supervisor do
         :ok
 
       pid ->
-        case DynamicSupervisor.terminate_child(@dynamic_supervisor, pid) do
+        case DynamicSupervisorCall.terminate_child(@dynamic_supervisor, pid) do
           :ok -> :ok
           {:error, _} = error -> error
         end
