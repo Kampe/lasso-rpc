@@ -141,6 +141,77 @@ defmodule Lasso.Integration.DynamicProvidersTest do
       refute first_instance == second_instance
     end
 
+    test "rejects unsafe provider headers before runtime publication", %{
+      provider_config: config,
+      test_id: test_id
+    } do
+      for unsafe <- [
+            %{headers: %{"host" => "attacker.invalid"}},
+            %{auth_headers: %{"x-tenant" => "safe\r\nx-injected: true"}},
+            %{api_key: "secret\nX-Injected: true"}
+          ] do
+        assert {:error, :invalid_provider_headers} =
+                 Providers.add_provider(@test_chain, Map.merge(config, unsafe), validate: false)
+
+        assert {:error, :not_found} =
+                 Lasso.Config.ConfigStore.get_provider("public", @test_chain, test_id)
+      end
+
+      assert {:ok, ^test_id} =
+               Providers.add_provider(
+                 @test_chain,
+                 Map.put(config, :auth_headers, %{"Authorization" => "Basic safe"}),
+                 validate: false
+               )
+
+      assert {:ok, published} =
+               Lasso.Config.ConfigStore.get_provider("public", @test_chain, test_id)
+
+      assert published.auth_headers == %{"Authorization" => "Basic safe"}
+    end
+
+    test "rejects unsafe headers in an entire runtime chain before publication" do
+      chain_id = 900_000_000 + :rand.uniform(99_999_999)
+
+      assert {:error, :invalid_provider_headers} =
+               Lasso.Config.ConfigStore.register_chain_runtime("public", chain_id, %{
+                 providers: [
+                   %{
+                     id: "bad-header",
+                     name: "Bad Header",
+                     url: "http://127.0.0.1:1",
+                     headers: %{"connection" => "keep-alive"}
+                   }
+                 ]
+               })
+
+      assert {:error, :not_found} = Lasso.Config.ConfigStore.get_chain("public", chain_id)
+    end
+
+    test "rejects unsafe headers while validating a file profile reload" do
+      assert {:ok, chain} = Lasso.Config.ConfigStore.get_chain("public", @test_chain)
+
+      bad_provider = %Lasso.Config.ChainConfig.Provider{
+        id: "bad-header",
+        name: "Bad Header",
+        url: "http://127.0.0.1:1",
+        priority: 1,
+        headers: %{"host" => "attacker.invalid"}
+      }
+
+      slug = "unsafe-headers-#{System.unique_integer([:positive])}"
+
+      spec = %{
+        scope: :system,
+        profile_id: slug,
+        slug: slug,
+        chains: %{"ethereum" => %{chain | providers: [bad_provider]}}
+      }
+
+      assert {:error, {:invalid_provider_headers, "ethereum", "bad-header"}} =
+               Lasso.Config.ConfigStore.validate_profile_specs([spec])
+    end
+
     test "can add a provider dynamically", %{provider_config: config, test_id: test_id} do
       # Add provider
       assert {:ok, provider_id} = Providers.add_provider(@test_chain, config)

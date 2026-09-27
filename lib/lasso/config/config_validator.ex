@@ -8,6 +8,7 @@ defmodule Lasso.Config.ConfigValidator do
 
   require Logger
   alias Lasso.Config.ChainConfig
+  alias Lasso.Providers.ProviderHeaders
   alias Lasso.RPC.Transport.HTTP.Client.Finch, as: BoundedHTTP
 
   @http_timeout 5000
@@ -161,6 +162,7 @@ defmodule Lasso.Config.ConfigValidator do
   def format_error(:duplicate_provider_ids), do: "Provider IDs must be unique"
   def format_error(:duplicate_provider_urls), do: "Provider URLs must be unique"
   def format_error(:invalid_provider_structure), do: "Provider must have id, name, and url"
+  def format_error(:invalid_provider_headers), do: "Provider headers contain invalid fields"
   def format_error(:invalid_priority_range), do: "Provider priorities must be >= 1"
   def format_error(:duplicate_priorities), do: "Provider priorities must be unique"
   def format_error(:invalid_subscribe_new_heads), do: "subscribe_new_heads must be a boolean"
@@ -232,9 +234,16 @@ defmodule Lasso.Config.ConfigValidator do
                _error -> true
              end
            end) do
-        nil -> :ok
+        nil -> validate_provider_headers(providers)
         _invalid_provider -> {:error, :invalid_provider_url}
       end
+    end
+  end
+
+  defp validate_provider_headers(providers) do
+    case Enum.find(providers, &(ProviderHeaders.validate(&1) != :ok)) do
+      nil -> :ok
+      _invalid_provider -> {:error, :invalid_provider_headers}
     end
   end
 
