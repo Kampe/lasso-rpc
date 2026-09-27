@@ -190,4 +190,60 @@ defmodule Lasso.RPC.HeadBranchRoutingTest do
                CandidateCursor.next(restricted)
     end
   end
+
+  test "head fallback keeps the sole method-capable minority branch", %{chain: chain} do
+    profile = "public"
+
+    assert :ok =
+             ConfigStore.register_chain_runtime(profile, chain, %{
+               block_time_ms: 1_000,
+               selection: %{max_lag_blocks: 2},
+               providers: []
+             })
+
+    suffix = Integer.to_string(chain)
+    minority = "minority-capable-#{suffix}"
+    majority_a = "majority-refusing-a-#{suffix}"
+    majority_b = "majority-refusing-b-#{suffix}"
+    refuses_balance = %{unsupported_methods: ["eth_getBalance"]}
+
+    setup_providers(
+      [
+        %{id: minority, priority: 1},
+        %{id: majority_a, priority: 2, capabilities: refuses_balance},
+        %{id: majority_b, priority: 3, capabilities: refuses_balance}
+      ],
+      provider_type: :ws
+    )
+
+    for {provider, hash} <- [
+          {minority, "0xbbb"},
+          {majority_a, "0xaaa"},
+          {majority_b, "0xaaa"}
+        ] do
+      instance_id = Catalog.lookup_instance_id(profile, chain, provider)
+      assert :ok = Registry.put_height(chain, instance_id, 100, :ws, %{hash: hash})
+    end
+
+    for strategy <- [:priority, :load_balanced, :fastest, :latency_weighted] do
+      cursor =
+        Selection.select_channel_candidates(profile, chain, "eth_getBalance",
+          strategy: strategy,
+          transport: :ws
+        )
+
+      assert cursor.filters.head_snapshot.qualification == :qualified
+      assert {:ok, %{provider_id: ^minority}, _} = CandidateCursor.next(cursor)
+    end
+
+    cursor =
+      Selection.select_channel_candidates(profile, chain, "eth_getBalance",
+        strategy: :priority,
+        transport: :ws,
+        exclude: [minority]
+      )
+
+    assert {:ok, %{provider_id: selected}, _} = CandidateCursor.next(cursor)
+    assert selected in [majority_a, majority_b]
+  end
 end

@@ -2,16 +2,17 @@ defmodule Lasso.Providers.CandidateListing do
   @moduledoc """
   Pure ETS reads for provider candidate selection.
 
-  Implements a 9-stage filter pipeline using shared ETS state:
+  Implements a filter pipeline using shared ETS state:
   1. Transport availability (provider config has url/ws_url)
   2. WS liveness (shared upstream connection state)
   3. Circuit breaker state
   4. Rate limit state
-  5. Lag filtering (captured profile head evidence for request routing)
-  6. Min block height filtering (block-height-aware routing)
-  7. Archival filtering
-  8. `subscribe_new_heads` capability filtering (newHeads-only)
-  9. Exclude list
+  5. Min block height filtering (block-height-aware routing)
+  6. Archival filtering
+  7. `subscribe_new_heads` capability filtering (newHeads-only)
+  8. Exclude list
+  9. Method capability filtering across eligible routes
+  10. Lag filtering (captured profile head evidence for request routing)
 
   Return shape: `%{id, config, availability, circuit_state, rate_limited}`.
   """
@@ -22,7 +23,8 @@ defmodule Lasso.Providers.CandidateListing do
   alias Lasso.Config.ConfigStore
   alias Lasso.Observations.HeadSnapshot
   alias Lasso.Providers.{Catalog, InstanceState, LagCalculation}
-  alias Lasso.RPC.{AttemptProjection, ChainState, RoutingPlan, SelectionFilters}
+  alias Lasso.RPC.{AttemptProjection, ChainState, Channel, RoutingPlan, SelectionFilters}
+  alias Lasso.RPC.Providers.AdapterFilter
   alias Lasso.RPC.RoutingEvidence.Workload
 
   @doc """
@@ -308,9 +310,11 @@ defmodule Lasso.Providers.CandidateListing do
       |> filter_by_subscribe_new_heads(Map.get(filters, :requires_subscribe_new_heads))
       |> filter_excluded(filters)
 
+    method_candidates = filter_by_method(gate_candidates, plan, Map.get(filters, :method))
+
     candidates =
       filter_by_lag(
-        gate_candidates,
+        method_candidates,
         plan,
         Map.get(filters, :max_lag_blocks),
         consensus_height,
@@ -326,6 +330,35 @@ defmodule Lasso.Providers.CandidateListing do
     else
       candidates
     end
+  end
+
+  defp filter_by_method(candidates, _plan, method) when not is_binary(method),
+    do: candidates
+
+  defp filter_by_method(candidates, plan, method) do
+    capable =
+      Enum.flat_map(candidates, fn candidate ->
+        transports =
+          Enum.filter(candidate.transports, fn transport ->
+            channel = %Channel{
+              profile: plan.profile,
+              chain_id: plan.chain_id,
+              provider_id: candidate.id,
+              instance_id: candidate.instance_id,
+              route_generation: plan.generation,
+              transport: transport,
+              provider_capabilities: Map.get(candidate.config, :capabilities)
+            }
+
+            AdapterFilter.method_supported?(channel, method)
+          end)
+
+        if transports == [], do: [], else: [%{candidate | transports: transports}]
+      end)
+
+    # Preserve the existing capability fail-open only when no eligible route
+    # supports the method. Head fallback must otherwise compare capable routes.
+    if capable == [], do: candidates, else: capable
   end
 
   @doc """

@@ -167,6 +167,7 @@ defmodule Lasso.RPC.Selection.CandidateCursor do
     filters =
       SelectionFilters.new(
         protocol: transport,
+        method: method,
         exclude: Keyword.get(opts, :exclude, []),
         include_half_open: Keyword.get(opts, :include_half_open, true),
         max_lag_blocks: plan.max_lag_blocks,

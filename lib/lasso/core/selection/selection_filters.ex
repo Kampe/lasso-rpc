@@ -14,6 +14,7 @@ defmodule Lasso.RPC.SelectionFilters do
 
   @type t :: %__MODULE__{
           protocol: protocol(),
+          method: String.t() | nil,
           exclude: [String.t()],
           include_half_open: boolean(),
           exclude_rate_limited: boolean(),
@@ -26,6 +27,7 @@ defmodule Lasso.RPC.SelectionFilters do
         }
 
   defstruct protocol: nil,
+            method: nil,
             exclude: [],
             include_half_open: false,
             exclude_rate_limited: false,
@@ -42,6 +44,7 @@ defmodule Lasso.RPC.SelectionFilters do
   ## Options
 
     * `:protocol` - Transport protocol filter (:http, :ws, :both, or nil for any)
+    * `:method` - Requested method for capability-aware head eligibility
     * `:exclude` - List of provider IDs to exclude
     * `:include_half_open` - Include half-open circuit breaker providers (default: false)
     * `:exclude_rate_limited` - Exclude rate-limited providers (default: false)
@@ -64,6 +67,7 @@ defmodule Lasso.RPC.SelectionFilters do
   def new(opts \\ []) do
     %__MODULE__{
       protocol: normalize_protocol(Keyword.get(opts, :protocol)),
+      method: Keyword.get(opts, :method),
       exclude: Keyword.get(opts, :exclude, []) |> List.wrap(),
       include_half_open: Keyword.get(opts, :include_half_open, false),
       exclude_rate_limited: Keyword.get(opts, :exclude_rate_limited, false),
@@ -85,6 +89,7 @@ defmodule Lasso.RPC.SelectionFilters do
   def from_map(map) when is_map(map) do
     %__MODULE__{
       protocol: normalize_protocol(map[:protocol] || Map.get(map, "protocol")),
+      method: map[:method] || Map.get(map, "method"),
       exclude: normalize_exclude(map[:exclude] || Map.get(map, "exclude")),
       include_half_open: to_boolean(map[:include_half_open] || Map.get(map, "include_half_open")),
       exclude_rate_limited:
@@ -108,6 +113,7 @@ defmodule Lasso.RPC.SelectionFilters do
   def to_map(%__MODULE__{} = filters) do
     %{
       protocol: filters.protocol,
+      method: filters.method,
       exclude: filters.exclude,
       include_half_open: filters.include_half_open,
       exclude_rate_limited: filters.exclude_rate_limited,

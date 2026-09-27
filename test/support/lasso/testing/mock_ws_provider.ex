@@ -67,7 +67,8 @@ defmodule Lasso.Testing.MockWSProvider do
       url: "http://mock-#{provider_id}.test",
       ws_url: "ws://mock-#{provider_id}.test",
       type: "test",
-      priority: Map.get(spec, :priority, 100)
+      priority: Map.get(spec, :priority, 100),
+      capabilities: Map.get(spec, :capabilities)
     }
 
     with :ok <- ChainHelper.ensure_chain_exists(chain_id, profile: profile),
