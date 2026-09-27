@@ -36,12 +36,13 @@ defmodule Lasso.RPC.MethodRegistry do
       "eth_estimateGas",
       "eth_getStorageAt",
       "eth_getTransactionCount",
+      # EIP-2930
       "eth_createAccessList",
       # EIP-1186 - archive nodes
       "eth_getProof"
     ],
 
-    # Network/utility methods
+    # Endpoint identification an application can rely on.
     network: [
       "net_version",
       "web3_clientVersion",
@@ -49,8 +50,10 @@ defmodule Lasso.RPC.MethodRegistry do
       "eth_syncing"
     ],
 
-    # Node-operator introspection is separated from application-facing network
-    # methods because hosted providers commonly withhold it by design.
+    # Node-operator introspection. Hosted providers deliberately withhold these
+    # because they leak infrastructure detail, so a missing one says nothing
+    # about the endpoint's usefulness. Grouped separately and left out of the
+    # default probe set so their absence stops dragging `network` to partial.
     node_admin: [
       "net_listening",
       "net_peerCount",
@@ -175,6 +178,26 @@ defmodule Lasso.RPC.MethodRegistry do
   @doc "Returns the category for a given method"
   @spec method_category(String.t()) :: atom()
   def method_category(method), do: Map.get(@method_categories, method, :unknown)
+
+  # Methods whose support cannot be established without a side effect on chain.
+  # A probe can only send a deliberately invalid payload, and the resulting
+  # rejection says nothing about whether the method works for a real
+  # transaction. Probing these produces a permanently inconclusive result, so
+  # they are reported as unverifiable instead of being dispatched.
+  @unverifiable_methods ~w(eth_sendRawTransaction eth_sendTransaction)
+
+  @doc """
+  Whether a method's support can be established by probing.
+
+  `false` means any probe result would be meaningless, not that the method is
+  unsupported.
+  """
+  @spec unverifiable?(String.t()) :: boolean()
+  def unverifiable?(method) when is_binary(method), do: method in @unverifiable_methods
+
+  @doc "Methods that cannot be verified by probing."
+  @spec unverifiable_methods() :: [String.t()]
+  def unverifiable_methods, do: @unverifiable_methods
 
   @doc """
   Returns default support assumption for unknown methods.
