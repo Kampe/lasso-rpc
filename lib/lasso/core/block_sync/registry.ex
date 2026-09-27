@@ -49,15 +49,39 @@ defmodule Lasso.BlockSync.Registry do
   def put_height(chain_id, provider_id, height, source, metadata \\ %{})
       when is_integer(chain_id) and chain_id > 0 and is_binary(provider_id) and
              is_integer(height) do
-    timestamp = System.system_time(:millisecond)
-    :ets.insert(@table, {{:height, chain_id, provider_id}, {height, timestamp, source, metadata}})
-    store_observation(chain_id, provider_id, height, timestamp, source, metadata)
-
-    update_block_time(chain_id, height)
-    revision = next_consensus_revision(chain_id)
-    refresh_consensus_cache(chain_id, timestamp, revision)
+    _result =
+      put_height_at(
+        chain_id,
+        provider_id,
+        height,
+        System.system_time(:millisecond),
+        source,
+        metadata
+      )
 
     :ok
+  end
+
+  @doc "Store a report using its source observation time, ignoring delayed older reports."
+  @spec put_height_at(pos_integer(), String.t(), integer(), integer(), :ws | :http, map()) ::
+          :ok | :ignored
+  def put_height_at(chain_id, provider_id, height, observed_at_ms, source, metadata)
+      when is_integer(chain_id) and chain_id > 0 and is_binary(provider_id) and
+             is_integer(height) and is_integer(observed_at_ms) and observed_at_ms >= 0 and
+             source in [:http, :ws] and is_map(metadata) do
+    key = {:height, chain_id, provider_id}
+    value = {height, observed_at_ms, source, metadata}
+    stored? = store_newer_height(key, value, @observation_retries)
+    store_observation(chain_id, provider_id, height, observed_at_ms, source, metadata)
+
+    if stored? do
+      update_block_time(chain_id, height)
+      revision = next_consensus_revision(chain_id)
+      refresh_consensus_cache(chain_id, System.system_time(:millisecond), revision)
+      :ok
+    else
+      :ignored
+    end
   end
 
   @doc """
@@ -299,6 +323,30 @@ defmodule Lasso.BlockSync.Registry do
   end
 
   ## Private Functions
+
+  defp store_newer_height(key, {_height, observed_at_ms, _source, _metadata} = value, retries)
+       when retries > 0 do
+    case :ets.lookup(@table, key) do
+      [{^key, {_height, current_at_ms, _source, _metadata}}]
+      when current_at_ms > observed_at_ms ->
+        false
+
+      [{^key, _value} = current] ->
+        updated = {key, value}
+
+        case :ets.select_replace(@table, [{current, [], [{:const, updated}]}]) do
+          1 -> true
+          0 -> store_newer_height(key, value, retries - 1)
+        end
+
+      [] ->
+        if :ets.insert_new(@table, {key, value}),
+          do: true,
+          else: store_newer_height(key, value, retries - 1)
+    end
+  end
+
+  defp store_newer_height(_key, _value, 0), do: false
 
   defp store_observation(chain_id, provider_id, height, timestamp, transport, metadata)
        when transport in [:http, :ws] and is_map(metadata) do

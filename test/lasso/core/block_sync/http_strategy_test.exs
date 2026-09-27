@@ -70,6 +70,7 @@ defmodule Lasso.BlockSync.Strategies.HttpStrategyTest do
     assert state.timer_ref == nil
     assert state.poll_owner_pid == owner_pid
 
+    earliest_observed_at_ms = System.system_time(:millisecond)
     send(owner_pid, :release_poll)
 
     assert_receive {:http_strategy, :poll_result, ^instance_id, owner_id, ^owner_pid, {:ok, 42}}
@@ -82,8 +83,12 @@ defmodule Lasso.BlockSync.Strategies.HttpStrategyTest do
                state
              )
 
-    assert_receive {:block_height, ^instance_id, 42, %{latency_ms: latency_ms}}
+    assert_receive {:block_height, ^instance_id, 42,
+                    %{latency_ms: latency_ms, observed_at_ms: observed_at_ms}}
+
     assert latency_ms >= 0
+    assert observed_at_ms >= earliest_observed_at_ms
+    assert observed_at_ms <= System.system_time(:millisecond)
     assert state.poll_owner_pid == nil
     assert is_reference(state.timer_ref)
     assert is_integer(Process.read_timer(state.timer_ref))

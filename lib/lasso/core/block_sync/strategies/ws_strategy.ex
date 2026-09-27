@@ -190,7 +190,10 @@ defmodule Lasso.BlockSync.Strategies.WsStrategy do
     now = System.system_time(:millisecond)
     {height, metadata} = parse_block_payload(payload)
 
-    send(state.parent, {:block_height, state.instance_id, height, metadata})
+    send(
+      state.parent,
+      {:block_height, state.instance_id, height, Map.put(metadata, :observed_at_ms, now)}
+    )
 
     first_block = state.last_block_time == nil
 
