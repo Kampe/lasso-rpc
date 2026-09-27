@@ -519,7 +519,12 @@ defmodule Lasso.Providers.ProbeCoordinatorTest do
   # Helpers
 
   defp start_coordinator(chain_id) do
-    {:ok, pid} = ProbeCoordinator.start_link(chain_id)
+    pid =
+      case ProbeCoordinator.start_link(chain_id) do
+        {:ok, pid} -> pid
+        {:error, {:already_started, pid}} -> pid
+      end
+
     send(pid, :load_instances)
     assert_wait_until(fn -> map_size(:sys.get_state(pid).instances) > 0 end)
     {:ok, pid}

@@ -217,11 +217,23 @@ defmodule Lasso.BlockSync.Worker do
       |> Map.put(:stale_after_ms, observation_stale_after_ms(state, source))
       |> maybe_put_optimistic_credit(state, source)
 
-    BlockSyncRegistry.put_height(state.chain_id, instance_id, height, source, metadata)
-    broadcast_height_update(state, height, source)
+    observed_at_ms = Map.get(metadata, :observed_at_ms, System.system_time(:millisecond))
 
-    state = maybe_clear_restart_count(state)
-    {:noreply, state}
+    case BlockSyncRegistry.put_height_at(
+           state.chain_id,
+           instance_id,
+           height,
+           observed_at_ms,
+           source,
+           Map.delete(metadata, :observed_at_ms)
+         ) do
+      :ok ->
+        broadcast_height_update(state, height, source, observed_at_ms)
+        {:noreply, maybe_clear_restart_count(state)}
+
+      :ignored ->
+        {:noreply, state}
+    end
   end
 
   # Status changes from strategies
@@ -363,9 +375,8 @@ defmodule Lasso.BlockSync.Worker do
     %{state | restart_count_cleared: true}
   end
 
-  defp broadcast_height_update(state, height, source) do
+  defp broadcast_height_update(state, height, source, observed_at_ms) do
     profiles = Catalog.get_instance_refs(state.instance_id)
-    timestamp = System.system_time(:millisecond)
 
     for profile <- profiles do
       provider_id =
@@ -373,7 +384,7 @@ defmodule Lasso.BlockSync.Worker do
           state.instance_id
 
       provider_key = {profile, provider_id}
-      msg = {:block_height_update, provider_key, height, source, timestamp}
+      msg = {:block_height_update, provider_key, height, source, observed_at_ms}
 
       Phoenix.PubSub.broadcast(
         Lasso.PubSub,

@@ -377,6 +377,7 @@ defmodule Lasso.BlockSync.Strategies.HttpStrategy do
       {:ok, height} ->
         metadata = %{
           latency_ms: latency_ms,
+          observed_at_ms: System.system_time(:millisecond),
           poll_references: plan.head_references_at_poll_start
         }
 
