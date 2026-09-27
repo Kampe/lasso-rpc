@@ -36,6 +36,7 @@ defmodule Lasso.Config.ConfigStore do
   alias Lasso.Config.ChainConfig.Provider
   alias Lasso.Config.ConfigStore.Owner
   alias Lasso.Config.ProfileMeta
+  alias Lasso.Providers.ProviderHeaders
 
   @persistent_term_key :lasso_config_store_active
   @default_profile Lasso.Config.ProfileValidator.default_profile()
@@ -734,7 +735,12 @@ defmodule Lasso.Config.ConfigStore do
       {:error, :not_found} ->
         chain_config = normalize_chain_config(chain_id, chain_attrs)
 
-        case ChainConfig.validate_no_unresolved_placeholders(chain_config) do
+        validation =
+          with :ok <- ChainConfig.validate_no_unresolved_placeholders(chain_config) do
+            validate_provider_headers(chain_config.providers)
+          end
+
+        case validation do
           :ok ->
             ensure_profile_in_list(profile_id)
             add_chain_to_profile(profile_id, chain_id, chain_config)
@@ -770,6 +776,7 @@ defmodule Lasso.Config.ConfigStore do
     with {:ok, chain_config} <- get_chain(profile_id, chain_id),
          provider_config <- normalize_provider_config(provider_attrs),
          :ok <- validate_provider_not_exists(chain_config, provider_config.id),
+         :ok <- ProviderHeaders.validate(provider_config),
          updated_chain <- add_provider_to_chain(chain_config, provider_config),
          :ok <- ChainConfig.validate_no_unresolved_placeholders(updated_chain) do
       update_chain_in_profile(profile_id, chain_id, updated_chain)
@@ -1392,8 +1399,9 @@ defmodule Lasso.Config.ConfigStore do
         {:error, :global_publication_unconfigured}
 
       true ->
-        with :ok <- validate_chain_aliases(chains, MapSet.new(ids)) do
-          validate_profile_provider_placeholders(chains)
+        with :ok <- validate_chain_aliases(chains, MapSet.new(ids)),
+             :ok <- validate_profile_provider_placeholders(chains) do
+          validate_profile_provider_headers(chains)
         end
     end
   end
@@ -1410,6 +1418,22 @@ defmodule Lasso.Config.ConfigStore do
           {:halt, {:error, {:unresolved_env_vars, [{chain_name, providers}]}}}
       end
     end)
+  end
+
+  defp validate_profile_provider_headers(chains) do
+    Enum.reduce_while(chains, :ok, fn {chain_name, chain}, :ok ->
+      case Enum.find(chain.providers, &(ProviderHeaders.validate(&1) != :ok)) do
+        nil -> {:cont, :ok}
+        provider -> {:halt, {:error, {:invalid_provider_headers, chain_name, provider.id}}}
+      end
+    end)
+  end
+
+  defp validate_provider_headers(providers) do
+    case Enum.find(providers, &(ProviderHeaders.validate(&1) != :ok)) do
+      nil -> :ok
+      _ -> {:error, :invalid_provider_headers}
+    end
   end
 
   defp validate_chain_aliases(chains, chain_ids) do

@@ -125,6 +125,7 @@ defmodule Lasso.Providers do
 
     with {:ok, existing} <- get_provider(profile, chain_name, provider_id),
          updated_config = Map.merge(existing, normalize_provider_config(updates)),
+         :ok <- maybe_validate(updated_config, true),
          :ok <- remove_provider(profile, chain_name, provider_id, persist: false),
          {:ok, _} <- add_provider(profile, chain_name, updated_config, persist: persist?) do
       Logger.info("Successfully updated provider #{provider_id} in #{chain_name}")
@@ -280,7 +281,8 @@ defmodule Lasso.Providers do
 
   defp maybe_validate(provider_config, true) do
     with :ok <- validate_required_fields(provider_config),
-         :ok <- ConfigValidator.validate_provider_url(provider_config.url) do
+         :ok <- ConfigValidator.validate_provider_url(provider_config.url),
+         :ok <- Lasso.Providers.ProviderHeaders.validate(provider_config) do
       maybe_validate_ws_url(provider_config.ws_url)
     end
   end
