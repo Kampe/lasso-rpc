@@ -36,6 +36,7 @@ defmodule Lasso.Config.ConfigStore do
   alias Lasso.Config.ChainConfig.Provider
   alias Lasso.Config.ConfigStore.Owner
   alias Lasso.Config.ProfileMeta
+  alias Lasso.Core.Support.DynamicSupervisorCall
   alias Lasso.Providers.ProviderHeaders
 
   @persistent_term_key :lasso_config_store_active
@@ -60,6 +61,13 @@ defmodule Lasso.Config.ConfigStore do
   # × ~100 profiles, sub-megabyte).
   @grace_period_ms 30_000
   @resolve_or_load_timeout_ms 5_000
+  @runtime_reconcile_retry_ms 1_000
+  @runtime_supervisors [
+    Lasso.BlockSync.DynamicSupervisor,
+    Lasso.Providers.InstanceDynamicSupervisor,
+    Lasso.Providers.ProbeSupervisor,
+    Lasso.ProfileChainSupervisor
+  ]
 
   ## Types
 
@@ -649,7 +657,10 @@ defmodule Lasso.Config.ConfigStore do
       retry_task_snapshot: nil,
       db_degraded: false,
       runtime_dirty_profiles: MapSet.new(),
-      last_good_specs: snapshot_profile_specs()
+      last_good_specs: snapshot_profile_specs(),
+      runtime_reconcile_timer: nil,
+      runtime_reconcile_attempt: 0,
+      runtime_supervisor_monitors: monitor_runtime_supervisors(%{})
     }
 
     {:ok, state}
@@ -684,11 +695,13 @@ defmodule Lasso.Config.ConfigStore do
     case do_load_all_profiles(state, preserve_current_ets_on_degraded?: true) do
       {:ok, profiles, new_state} ->
         Logger.info("Configuration reloaded successfully")
-        rebuild_shared_infrastructure(old_chain_ids)
-        sync_chain_supervisors(old_pairs)
+        publication = rebuild_shared_infrastructure(old_chain_ids)
+        chain_results = sync_chain_supervisors(old_pairs)
         reconcile_transport_channels_all(old_endpoints)
         Enum.each(profiles, &broadcast_profile_updated/1)
-        {:reply, :ok, %{new_state | db_degraded: false, runtime_dirty_profiles: MapSet.new()}}
+
+        {:reply, runtime_reconcile_status([publication | chain_results]),
+         %{new_state | db_degraded: false, runtime_dirty_profiles: MapSet.new()}}
 
       {:degraded, _profiles, new_state} ->
         # Keep serving the last good snapshot and retry in the background.
@@ -838,7 +851,8 @@ defmodule Lasso.Config.ConfigStore do
       chains_loaded: length(chain_ids),
       total_providers: total_providers,
       last_loaded: state.last_loaded,
-      backend: state.backend_module
+      backend: state.backend_module,
+      runtime_reconcile_pending: not is_nil(state.runtime_reconcile_timer)
     }
 
     {:reply, status, state}
@@ -925,8 +939,14 @@ defmodule Lasso.Config.ConfigStore do
 
     case result do
       {:ok, specs} ->
-        Logger.info("ConfigStore: retry succeeded, exiting degraded mode")
-        apply_retry_deltas(specs, snapshot, state.runtime_dirty_profiles)
+        case apply_retry_deltas(specs, snapshot, state.runtime_dirty_profiles) do
+          :ok ->
+            Logger.info("ConfigStore: retry succeeded, exiting degraded mode")
+
+          {:error, _} ->
+            Logger.warning("ConfigStore: backend recovered; runtime reconciliation pending")
+        end
+
         {:noreply, %{state | db_degraded: false, last_loaded: DateTime.utc_now()}}
 
       {:degraded, _specs} ->
@@ -945,6 +965,58 @@ defmodule Lasso.Config.ConfigStore do
       when ref == state.retry_task_ref do
     Logger.warning("ConfigStore retry task crashed: #{inspect(reason)}")
     {:noreply, schedule_retry(%{state | retry_task_ref: nil, retry_task_snapshot: nil})}
+  end
+
+  @impl true
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+    case Map.pop(state.runtime_supervisor_monitors, ref) do
+      {nil, _monitors} ->
+        {:noreply, state}
+
+      {supervisor, monitors} ->
+        send(self(), {:runtime_reconcile_needed, {:supervisor_down, supervisor}})
+        {:noreply, %{state | runtime_supervisor_monitors: monitors}}
+    end
+  end
+
+  @impl true
+  def handle_info({:runtime_reconcile_needed, operation}, %{runtime_reconcile_timer: nil} = state) do
+    emit_runtime_reconcile_telemetry(:scheduled, operation)
+
+    timer =
+      Process.send_after(
+        self(),
+        :retry_runtime_reconcile,
+        runtime_retry_delay(state.runtime_reconcile_attempt)
+      )
+
+    {:noreply,
+     %{
+       state
+       | runtime_reconcile_timer: timer,
+         runtime_reconcile_attempt: state.runtime_reconcile_attempt + 1
+     }}
+  end
+
+  def handle_info({:runtime_reconcile_needed, _operation}, state), do: {:noreply, state}
+
+  @impl true
+  def handle_info(:retry_runtime_reconcile, state) do
+    emit_runtime_reconcile_telemetry(:attempted, :all)
+
+    monitors = monitor_runtime_supervisors(state.runtime_supervisor_monitors)
+    publication = rebuild_shared_infrastructure(list_chain_ids())
+    chain_results = ensure_all_profile_chain_supervisors()
+    result = runtime_reconcile_status([publication | chain_results])
+    attempt = if result == :ok, do: 0, else: state.runtime_reconcile_attempt
+
+    {:noreply,
+     %{
+       state
+       | runtime_reconcile_timer: nil,
+         runtime_reconcile_attempt: attempt,
+         runtime_supervisor_monitors: monitors
+     }}
   end
 
   ## Private Functions
@@ -1026,14 +1098,13 @@ defmodule Lasso.Config.ConfigStore do
     update_indices_for_inject(profile_spec)
 
     # Inject path uses post-mutation chain_ids.
-    rebuild_shared_infrastructure(list_chain_ids())
-
-    start_profile_chain_supervisors(profile_id)
+    publication = rebuild_shared_infrastructure(list_chain_ids())
+    chain_results = start_profile_chain_supervisors(profile_id)
 
     notify_inject()
     broadcast_profile_updated(profile_id)
 
-    :ok
+    runtime_reconcile_status([publication | chain_results])
   rescue
     e ->
       Logger.error("Failed to inject profile: #{inspect(e)}")
@@ -1067,13 +1138,13 @@ defmodule Lasso.Config.ConfigStore do
         store_profile(profile_spec)
         delete_stale_resolve_entry(old_meta, profile_spec)
         rebuild_indices_for_profile(profile_id, old_profile_chains, profile_spec)
-        rebuild_shared_infrastructure(old_chain_ids)
-        sync_chain_supervisors(old_pairs)
+        publication = rebuild_shared_infrastructure(old_chain_ids)
+        chain_results = sync_chain_supervisors(old_pairs)
         reconcile_transport_channels(profile_id, old_chain_configs, profile_spec)
         notify_inject()
         broadcast_profile_updated(profile_id)
 
-        :ok
+        runtime_reconcile_status([publication | chain_results])
     end
   rescue
     e ->
@@ -1097,12 +1168,12 @@ defmodule Lasso.Config.ConfigStore do
 
         publish_profile_removal(profile_id, meta)
 
-        rebuild_shared_infrastructure(old_chain_ids)
-        sync_chain_supervisors(old_pairs)
+        publication = rebuild_shared_infrastructure(old_chain_ids)
+        chain_results = sync_chain_supervisors(old_pairs)
         notify_inject()
         broadcast_profile_updated(profile_id)
 
-        :ok
+        runtime_reconcile_status([publication | chain_results])
     end
   rescue
     e ->
@@ -1183,13 +1254,15 @@ defmodule Lasso.Config.ConfigStore do
     changed_ids = changed_profile_ids ++ removed_profile_ids
 
     if changed_ids != [] do
-      rebuild_shared_infrastructure(old_chain_ids)
-      sync_chain_supervisors(old_pairs)
+      publication = rebuild_shared_infrastructure(old_chain_ids)
+      chain_results = sync_chain_supervisors(old_pairs)
       notify_inject()
       Enum.each(changed_ids, &broadcast_profile_updated/1)
-    end
 
-    :ok
+      runtime_reconcile_status([publication | chain_results])
+    else
+      :ok
+    end
   end
 
   defp do_inject_profile_without_rebuild(profile_spec) do
@@ -1568,7 +1641,7 @@ defmodule Lasso.Config.ConfigStore do
   end
 
   defp mark_runtime_dirty(state, profile_id, reply) do
-    if reply == :ok do
+    if reply == :ok or match?({:error, {:runtime_reconcile_pending, _}}, reply) do
       state = refresh_last_good_specs(state, :ok)
       %{state | runtime_dirty_profiles: MapSet.put(state.runtime_dirty_profiles, profile_id)}
     else
@@ -2056,11 +2129,9 @@ defmodule Lasso.Config.ConfigStore do
     for chain_id <- chain_ids do
       case get_chain(profile_id, chain_id) do
         {:ok, chain_config} ->
-          Lasso.ProfileChainSupervisor.start_profile_chain(
-            profile_id,
-            chain_id,
-            chain_config
-          )
+          profile_id
+          |> Lasso.ProfileChainSupervisor.start_profile_chain(chain_id, chain_config)
+          |> track_runtime_reconcile_result(:profile_chain_start)
 
         _ ->
           :ok
@@ -2068,7 +2139,7 @@ defmodule Lasso.Config.ConfigStore do
     end
   rescue
     e ->
-      Logger.warning("Failed to start chain supervisors for #{profile_id}: #{inspect(e)}")
+      [track_runtime_reconcile_result({:error, e}, :profile_chain_start)]
   end
 
   defp collect_profile_chain_pairs do
@@ -2080,22 +2151,30 @@ defmodule Lasso.Config.ConfigStore do
   defp sync_chain_supervisors(old_pairs) do
     new_pairs = collect_profile_chain_pairs()
 
-    for {profile_id, chain_id} <- new_pairs -- old_pairs do
-      case get_chain(profile_id, chain_id) do
-        {:ok, config} ->
-          Lasso.ProfileChainSupervisor.start_profile_chain(profile_id, chain_id, config)
+    starts =
+      for {profile_id, chain_id} <- new_pairs do
+        case get_chain(profile_id, chain_id) do
+          {:ok, config} ->
+            profile_id
+            |> Lasso.ProfileChainSupervisor.start_profile_chain(chain_id, config)
+            |> track_runtime_reconcile_result(:profile_chain_start)
 
-        _ ->
-          :ok
+          _ ->
+            :ok
+        end
       end
-    end
 
-    for {profile_id, chain_id} <- old_pairs -- new_pairs do
-      Lasso.ProfileChainSupervisor.stop_profile_chain(profile_id, chain_id)
-    end
+    stops =
+      for {profile_id, chain_id} <- old_pairs -- new_pairs do
+        profile_id
+        |> Lasso.ProfileChainSupervisor.stop_profile_chain(chain_id)
+        |> track_runtime_reconcile_result(:profile_chain_stop)
+      end
+
+    starts ++ stops
   rescue
     e ->
-      Logger.warning("Failed to sync chain supervisors on reload: #{inspect(e)}")
+      [track_runtime_reconcile_result({:error, e}, :profile_chain_sync)]
   end
 
   defp snapshot_profile_chain_configs(profile_id, chain_ids) do
@@ -2224,60 +2303,80 @@ defmodule Lasso.Config.ConfigStore do
     new_instances = Catalog.list_all_instance_ids()
     new_chain_ids = list_chain_ids()
 
-    for instance_id <- new_instances do
-      case DynamicSupervisor.start_child(
-             Lasso.Providers.InstanceDynamicSupervisor,
-             {InstanceSupervisor, instance_id}
-           ) do
-        {:ok, _} ->
-          :ok
-
-        :ignore ->
-          :ok
-
-        {:error, {:already_started, _}} ->
-          :ok
-
-        {:error, reason} ->
-          Logger.warning(
-            "Failed to start InstanceSupervisor for #{instance_id}: #{inspect(reason)}"
-          )
-      end
-    end
-
-    for instance_id <- old_instances -- new_instances do
-      case GenServer.whereis(InstanceSupervisor.via_name(instance_id)) do
-        nil -> :ok
-        pid -> DynamicSupervisor.terminate_child(Lasso.Providers.InstanceDynamicSupervisor, pid)
+    instance_starts =
+      for instance_id <- new_instances do
+        case DynamicSupervisorCall.start_child(
+               Lasso.Providers.InstanceDynamicSupervisor,
+               {InstanceSupervisor, instance_id}
+             ) do
+          {:ok, _} -> :ok
+          :ignore -> :ok
+          {:error, {:already_started, _}} -> :ok
+          {:error, _} = error -> track_runtime_reconcile_result(error, :instance_start)
+        end
       end
 
-      Lasso.Providers.InstanceState.clear(instance_id)
-    end
+    instance_stops =
+      for instance_id <- old_instances -- new_instances do
+        result =
+          case GenServer.whereis(InstanceSupervisor.via_name(instance_id)) do
+            nil ->
+              :ok
 
-    for chain_id <- new_chain_ids do
-      case DynamicSupervisor.start_child(
-             Lasso.Providers.ProbeSupervisor,
-             {ProbeCoordinator, chain_id}
-           ) do
-        {:ok, _} -> :ok
-        {:error, {:already_started, _}} -> ProbeCoordinator.reload_instances(chain_id)
-        _ -> :ok
+            pid ->
+              DynamicSupervisorCall.terminate_child(
+                Lasso.Providers.InstanceDynamicSupervisor,
+                pid
+              )
+              |> track_runtime_reconcile_result(:instance_stop)
+          end
+
+        Lasso.Providers.InstanceState.clear(instance_id)
+        result
       end
-    end
 
-    for chain_id <- old_chain_ids -- new_chain_ids do
-      case GenServer.whereis(ProbeCoordinator.via_name(chain_id)) do
-        nil -> :ok
-        pid -> DynamicSupervisor.terminate_child(Lasso.Providers.ProbeSupervisor, pid)
+    probe_starts =
+      for chain_id <- new_chain_ids do
+        case DynamicSupervisorCall.start_child(
+               Lasso.Providers.ProbeSupervisor,
+               {ProbeCoordinator, chain_id}
+             ) do
+          {:ok, _} -> :ok
+          {:error, {:already_started, _}} -> ProbeCoordinator.reload_instances(chain_id)
+          {:error, _} = error -> track_runtime_reconcile_result(error, :probe_start)
+          _ -> :ok
+        end
       end
 
-      Lasso.Providers.RestartCounter.clear({:probe_coord, chain_id})
-    end
+    probe_stops =
+      for chain_id <- old_chain_ids -- new_chain_ids do
+        result =
+          case GenServer.whereis(ProbeCoordinator.via_name(chain_id)) do
+            nil ->
+              :ok
 
-    reconcile_block_sync_workers(old_instances, old_instance_chain_ids)
+            pid ->
+              DynamicSupervisorCall.terminate_child(Lasso.Providers.ProbeSupervisor, pid)
+              |> track_runtime_reconcile_result(:probe_stop)
+          end
+
+        Lasso.Providers.RestartCounter.clear({:probe_coord, chain_id})
+        result
+      end
+
+    block_sync = reconcile_block_sync_workers(old_instances, old_instance_chain_ids)
+
+    runtime_reconcile_status(
+      instance_starts ++ instance_stops ++ probe_starts ++ probe_stops ++ block_sync
+    )
   rescue
-    e ->
-      Logger.warning("Failed to rebuild shared infrastructure: #{inspect(e)}")
+    error ->
+      track_runtime_reconcile_result({:error, error}, :shared_infrastructure)
+      {:error, {:runtime_reconcile_pending, error}}
+  catch
+    :exit, reason ->
+      track_runtime_reconcile_result({:error, reason}, :shared_infrastructure)
+      {:error, {:runtime_reconcile_pending, reason}}
   end
 
   defp snapshot_instance_chain_ids(instance_ids) do
@@ -2302,37 +2401,50 @@ defmodule Lasso.Config.ConfigStore do
     # Reap dropped instances before spawning new ones to enforce the
     # probe-intensity contract: no window where two workers for the same
     # provider URL run concurrently (auth rotation scenario).
-    for instance_id <- removed do
-      case Map.get(old_instance_chain_ids, instance_id) do
-        nil ->
-          :ok
+    stops =
+      for instance_id <- removed do
+        result =
+          case Map.get(old_instance_chain_ids, instance_id) do
+            nil ->
+              :ok
 
-        chain_id ->
-          Lasso.BlockSync.Supervisor.stop_worker(chain_id, instance_id)
-          Lasso.BlockSync.Registry.remove_instance(chain_id, instance_id)
+            chain_id ->
+              result =
+                chain_id
+                |> Lasso.BlockSync.Supervisor.stop_worker(instance_id)
+                |> track_runtime_reconcile_result(:block_sync_stop)
+
+              Lasso.BlockSync.Registry.remove_instance(chain_id, instance_id)
+              result
+          end
+
+        Lasso.Providers.RestartCounter.clear({:block_sync, instance_id})
+        result
       end
 
-      Lasso.Providers.RestartCounter.clear({:block_sync, instance_id})
-    end
+    starts =
+      for instance_id <- new_instances do
+        case Catalog.get_instance(instance_id) do
+          {:ok, %{chain_id: chain_id}} ->
+            chain_id
+            |> Lasso.BlockSync.Supervisor.start_worker(instance_id)
+            |> track_runtime_reconcile_result(:block_sync_start)
 
-    for instance_id <- added do
-      case Catalog.get_instance(instance_id) do
-        {:ok, %{chain_id: chain_id}} ->
-          Lasso.BlockSync.Supervisor.start_worker(chain_id, instance_id)
-
-        _ ->
-          :ok
+          _ ->
+            :ok
+        end
       end
-    end
 
     # Single signal: retained instances whose ref set or config may have
     # changed pick up the new config via :instance_config_updated. Added
     # workers load fresh config in handle_continue; removed are gone.
-    broadcast_instance_config_changes(retained)
+    broadcasts = broadcast_instance_config_changes(retained)
 
     if added != [] or removed != [] do
       Logger.info("Reconciled BlockSync workers: +#{length(added)} -#{length(removed)}")
     end
+
+    stops ++ starts ++ broadcasts
   end
 
   defp broadcast_instance_config_changes(instance_ids) do
@@ -2342,6 +2454,55 @@ defmodule Lasso.Config.ConfigStore do
         Lasso.Topics.instance_config_updated(instance_id),
         :instance_config_updated
       )
+      |> track_runtime_reconcile_result(:instance_config_broadcast)
     end
+  end
+
+  defp ensure_all_profile_chain_supervisors do
+    Enum.flat_map(list_profiles(), &start_profile_chain_supervisors/1)
+  end
+
+  defp monitor_runtime_supervisors(monitors) do
+    monitored = Map.values(monitors)
+
+    Enum.reduce(@runtime_supervisors -- monitored, monitors, fn supervisor, acc ->
+      case Process.whereis(supervisor) do
+        pid when is_pid(pid) -> Map.put(acc, Process.monitor(pid), supervisor)
+        nil -> acc
+      end
+    end)
+  end
+
+  defp track_runtime_reconcile_result({:error, reason} = error, operation) do
+    Logger.warning("Runtime reconciliation pending",
+      operation: operation,
+      reason: inspect(reason)
+    )
+
+    send(self(), {:runtime_reconcile_needed, operation})
+    error
+  end
+
+  defp track_runtime_reconcile_result(result, _operation), do: result
+
+  defp runtime_reconcile_status(results) do
+    case Enum.find(results, &match?({:error, _}, &1)) do
+      {:error, {:runtime_reconcile_pending, _}} = pending -> pending
+      {:error, reason} -> {:error, {:runtime_reconcile_pending, reason}}
+      nil -> :ok
+    end
+  end
+
+  defp runtime_retry_delay(attempt) do
+    base = min(@runtime_reconcile_retry_ms * Integer.pow(2, min(attempt, 5)), 30_000)
+    base + jitter(base)
+  end
+
+  defp emit_runtime_reconcile_telemetry(event, operation) do
+    :telemetry.execute(
+      [:lasso, :config, :runtime_reconcile, event],
+      %{count: 1},
+      %{operation: operation}
+    )
   end
 end
