@@ -9,6 +9,8 @@ defmodule Lasso.Benchmarking.Persistence do
 
   require Logger
 
+  @type chain_name :: pos_integer() | String.t()
+
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -17,7 +19,7 @@ defmodule Lasso.Benchmarking.Persistence do
   @doc """
   Saves a performance snapshot to file storage.
   """
-  @spec save_snapshot(String.t(), String.t(), map()) :: :ok
+  @spec save_snapshot(String.t(), chain_name(), map()) :: :ok
   def save_snapshot(profile, chain_name, snapshot_data) do
     GenServer.cast(__MODULE__, {:save_snapshot, profile, chain_name, snapshot_data})
   end
@@ -25,7 +27,7 @@ defmodule Lasso.Benchmarking.Persistence do
   @doc """
   Loads historical snapshots for a profile and chain within a time range.
   """
-  @spec load_snapshots(String.t(), String.t(), non_neg_integer()) :: [map()]
+  @spec load_snapshots(String.t(), chain_name(), non_neg_integer()) :: [map()]
   def load_snapshots(profile, chain_name, hours_back \\ 24) do
     GenServer.call(__MODULE__, {:load_snapshots, profile, chain_name, hours_back})
   end
