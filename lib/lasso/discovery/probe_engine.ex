@@ -47,7 +47,8 @@ defmodule Lasso.Discovery.ProbeEngine do
       timeout: timeout + 1000,
       on_timeout: :kill_task
     )
-    |> Enum.map(&normalize_task_result/1)
+    |> Stream.zip(items)
+    |> Enum.map(fn {result, item} -> normalize_task_result(result, item) end)
   end
 
   @doc """
@@ -116,22 +117,22 @@ defmodule Lasso.Discovery.ProbeEngine do
         end
       end)
 
-    case Task.yield(task, timeout) || Task.shutdown(task) do
+    case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
       {:ok, result} -> result
       nil -> {:timeout, item}
     end
   end
 
   # Normalizes Task.async_stream results
-  defp normalize_task_result({:ok, {item, result}}) do
+  defp normalize_task_result({:ok, {item, result}}, _original) do
     {item, result}
   end
 
-  defp normalize_task_result({:exit, :timeout}) do
-    {:unknown, {:timeout, :task_killed}}
+  defp normalize_task_result({:exit, :timeout}, item) do
+    {item, {:timeout, :task_killed}}
   end
 
-  defp normalize_task_result({:exit, reason}) do
-    {:unknown, {:error, {:exit, reason}}}
+  defp normalize_task_result({:exit, reason}, item) do
+    {item, {:error, {:exit, reason}}}
   end
 end
