@@ -333,6 +333,7 @@ defmodule Lasso.RPC.Selection do
     pool_filters =
       SelectionFilters.new(
         protocol: pool_protocol,
+        method: method,
         exclude: Keyword.get(opts, :exclude, []),
         include_half_open: Keyword.get(opts, :include_half_open, true),
         max_lag_blocks: plan.max_lag_blocks,
@@ -1118,6 +1119,7 @@ defmodule Lasso.RPC.Selection do
       SelectionFilters.new(
         exclude: exclude,
         protocol: protocol,
+        method: method,
         include_half_open: include_half_open,
         max_lag_blocks: plan.max_lag_blocks,
         head_snapshot: HeadEvidence.snapshot_for_plan(plan),
