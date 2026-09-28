@@ -17,21 +17,24 @@ defmodule Lasso.Integration.DiscoverySafeProbeTest do
       request = Jason.decode!(body)
       send(opts[:observer], {:probe_request, request["method"], request["params"]})
 
-      {status, message} =
+      {status, message, code} =
         case opts[:mode] do
-          :auth -> {401, "Unauthorized"}
-          :quota -> {402, "Payment required: credits exhausted"}
-          :rate_limit -> {429, "Too many requests"}
-          _ -> {200, "Method is not available"}
+          :auth -> {401, "Unauthorized", -32_000}
+          :quota -> {402, "Payment required: credits exhausted", -32_000}
+          :typed_quota -> {200, "monthly quota exceeded", 30}
+          :rate_limit -> {429, "Too many requests", -32_000}
+          :definitive_quota_word -> {200, "monthly quota exceeded", -32_700}
+          _ -> {200, "Method is not available", -32_000}
         end
 
       response = %{
         "jsonrpc" => "2.0",
         "id" => request["id"],
-        "error" => %{"code" => -32_000, "message" => message}
+        "error" => %{"code" => code, "message" => message}
       }
 
-      send_resp(conn, status, Jason.encode!(response))
+      body = if opts[:mode] == :quota, do: message, else: Jason.encode!(response)
+      send_resp(conn, status, body)
     end
   end
 
@@ -78,7 +81,11 @@ defmodule Lasso.Integration.DiscoverySafeProbeTest do
   end
 
   test "HTTP method probing stops after authentication or quota exhaustion" do
-    for {mode, reason} <- [auth: :auth_required, quota: :quota_exhausted] do
+    for {mode, reason} <- [
+          auth: :auth_required,
+          quota: :quota_exhausted,
+          typed_quota: :quota_exhausted
+        ] do
       url = start_upstream(mode)
 
       assert {:aborted, ^reason} =
@@ -113,6 +120,15 @@ defmodule Lasso.Integration.DiscoverySafeProbeTest do
     assert is_list(results)
     assert_receive {:throttled, %{phase: :methods}}
     assert count_probe_requests("eth_chainId", 0) == 1
+  end
+
+  test "definitive JSON-RPC errors with quota words do not abort method discovery" do
+    url = start_upstream(:definitive_quota_word)
+
+    results = MethodSupport.probe(url, level: :critical, timeout: 2_000, concurrent: 2)
+
+    assert is_list(results)
+    assert Enum.all?(results, &(&1.status == :unknown))
   end
 
   defp count_probe_requests(method, count) do
