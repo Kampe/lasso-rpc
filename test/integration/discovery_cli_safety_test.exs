@@ -14,46 +14,53 @@ defmodule Lasso.Integration.DiscoveryCliSafetyTest do
     def call(conn, opts) do
       {:ok, body, conn} = read_body(conn)
       request = Jason.decode!(body)
-      method = request["method"]
-      send(opts[:observer], {:discovery_request, method, request["params"]})
 
-      response =
-        case {opts[:mode], method} do
-          {:identity_unavailable, "eth_chainId"} ->
-            error(request, -32_000, "chain identity unavailable")
+      if is_list(request) do
+        send(opts[:observer], {:discovery_batch, length(request)})
+        responses = Enum.map(request, fn _ -> %{jsonrpc: "2.0", id: 999, result: "0x1"} end)
+        send_resp(conn, 200, Jason.encode!(responses))
+      else
+        method = request["method"]
+        send(opts[:observer], {:discovery_request, method, request["params"]})
 
-          {:wrong_block_id, "eth_blockNumber"} ->
-            %{jsonrpc: "2.0", id: 999, result: "0x200000"}
+        response =
+          case {opts[:mode], method} do
+            {:identity_unavailable, "eth_chainId"} ->
+              error(request, -32_000, "chain identity unavailable")
 
-          {:invalid_height, "eth_blockNumber"} ->
-            success(request, "0xnot-a-quantity")
+            {:wrong_block_id, "eth_blockNumber"} ->
+              %{jsonrpc: "2.0", id: 999, result: "0x200000"}
 
-          {:young_chain, "eth_blockNumber"} ->
-            success(request, "0x5")
+            {:invalid_height, "eth_blockNumber"} ->
+              success(request, "0xnot-a-quantity")
 
-          {:range_error, "eth_getLogs"} ->
-            error(request, -32_601, "Method not found")
+            {:young_chain, "eth_blockNumber"} ->
+              success(request, "0x5")
 
-          {_, "eth_chainId"} ->
-            success(request, "0x89")
+            {:range_error, "eth_getLogs"} ->
+              error(request, -32_601, "Method not found")
 
-          {_, "eth_blockNumber"} ->
-            success(request, "0x200000")
+            {_, "eth_chainId"} ->
+              success(request, "0x89")
 
-          {_, "eth_getBalance"} ->
-            success(request, "0x0")
+            {_, "eth_blockNumber"} ->
+              success(request, "0x200000")
 
-          {_, "eth_getLogs"} ->
-            success(request, [])
+            {_, "eth_getBalance"} ->
+              success(request, "0x0")
 
-          {_, "eth_getBlockByNumber"} ->
-            success(request, %{"number" => "0x1"})
+            {_, "eth_getLogs"} ->
+              success(request, [])
 
-          _ ->
-            error(request, -32_601, "Method not found")
-        end
+            {_, "eth_getBlockByNumber"} ->
+              success(request, %{"number" => "0x1"})
 
-      send_resp(conn, 200, Jason.encode!(response))
+            _ ->
+              error(request, -32_601, "Method not found")
+          end
+
+        send_resp(conn, 200, Jason.encode!(response))
+      end
     end
 
     defp success(request, result),
@@ -130,6 +137,15 @@ defmodule Lasso.Integration.DiscoveryCliSafetyTest do
 
     assert %{archive_support: %{status: :inconclusive}} =
              Limits.probe(young_chain_url, tests: [:archive_support], timeout: 1_000)
+  end
+
+  test "batch support does not trust a list with duplicate or unrelated response IDs" do
+    url = start_upstream(:duplicate_batch_ids)
+
+    assert %{batch_requests: %{status: :not_supported}} =
+             Limits.probe(url, tests: [:batch_requests], timeout: 1_000)
+
+    assert_receive {:discovery_batch, 10}
   end
 
   defp start_upstream(mode) do

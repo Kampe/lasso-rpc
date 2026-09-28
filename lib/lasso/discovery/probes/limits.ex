@@ -287,7 +287,9 @@ defmodule Lasso.Discovery.Probes.Limits do
       {:ok, %{status: 200, body: response_body}} ->
         case Jason.decode(response_body) do
           {:ok, responses} when is_list(responses) ->
-            if length(responses) == size, do: {:ok, size}, else: {:partial, length(responses)}
+            if valid_batch_response?(responses, size),
+              do: {:ok, size},
+              else: {:error, :invalid_batch_response}
 
           {:ok, %{"error" => _}} ->
             {:error, "Error response"}
@@ -306,6 +308,21 @@ defmodule Lasso.Discovery.Probes.Limits do
         {:error, reason}
     end)
   end
+
+  defp valid_batch_response?(responses, size) when length(responses) == size do
+    ids =
+      Enum.map(responses, fn
+        %{"id" => id} -> id
+        _ -> nil
+      end)
+
+    Enum.sort(ids) == Enum.to_list(1..size) and
+      Enum.all?(responses, fn response ->
+        match?({:ok, _}, Response.validate(response, Map.get(response, "id")))
+      end)
+  end
+
+  defp valid_batch_response?(_responses, _size), do: false
 
   # Block parameter support test
   defp test_block_params(url, timeout) do
