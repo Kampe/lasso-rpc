@@ -295,7 +295,7 @@ defmodule Lasso.RPC.Transport.HTTP.Client.Finch do
         {:cont, %{acc | trailers: acc.trailers ++ trailers}}
     end
 
-    case Finch.stream_while(request, finch_name, initial, stream_fun, request_options) do
+    case stream_with_deadline(request, finch_name, initial, stream_fun, request_options) do
       {:ok, %{error: nil} = acc} ->
         {:ok,
          %Finch.Response{
@@ -313,6 +313,45 @@ defmodule Lasso.RPC.Transport.HTTP.Client.Finch do
 
       {:error, _error, %{error: reason}} ->
         {:error, {:response_limit, reason}}
+    end
+  end
+
+  # Finch 0.23 can check a still-open HTTP/1 connection back into its pool after
+  # Mint 1.11 reports a receive timeout. Its unfinished response can then be
+  # mistaken for the next request's response. Kill the checkout owner at our
+  # deadline, before Finch's own receive timeout, so the checkout is discarded.
+  defp stream_with_deadline(request, finch_name, initial, stream_fun, request_options) do
+    timeout_ms = Keyword.fetch!(request_options, :receive_timeout)
+
+    finch_options =
+      request_options
+      |> Keyword.put(:receive_timeout, timeout_ms + 1_000)
+      |> Keyword.put(:request_timeout, timeout_ms + 1_000)
+
+    task =
+      Task.async(fn ->
+        try do
+          {:returned, Finch.stream_while(request, finch_name, initial, stream_fun, finch_options)}
+        rescue
+          error -> {:raised, error, __STACKTRACE__}
+        catch
+          kind, reason -> {:caught, kind, reason, __STACKTRACE__}
+        end
+      end)
+
+    case Task.yield(task, timeout_ms) do
+      {:ok, {:returned, result}} ->
+        result
+
+      {:ok, {:raised, error, stacktrace}} ->
+        reraise error, stacktrace
+
+      {:ok, {:caught, kind, reason, stacktrace}} ->
+        :erlang.raise(kind, reason, stacktrace)
+
+      nil ->
+        _ = Task.shutdown(task, :brutal_kill)
+        {:error, Finch.TransportError.exception(reason: :timeout), initial}
     end
   end
 

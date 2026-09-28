@@ -309,6 +309,84 @@ defmodule Lasso.RPC.Transport.HTTP.FinchResponseBoundsTest do
     assert_empty()
   end
 
+  test "a receive timeout cannot lend an unfinished HTTP response to the next request" do
+    finch_name = __MODULE__.TimeoutFinch
+
+    start_supervised!(
+      {Finch, name: finch_name, pools: %{:default => [size: 1, count: 1, protocols: [:http1]]}}
+    )
+
+    {:ok, listener} =
+      :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+    {:ok, port} = :inet.port(listener)
+    parent = self()
+
+    first_server =
+      spawn(fn ->
+        {:ok, socket} = :gen_tcp.accept(listener, 1_000)
+        {:ok, _request} = receive_headers(socket, "")
+        send(parent, :first_received)
+        Process.sleep(150)
+        _ = :gen_tcp.send(socket, http_response("first"))
+
+        case receive_headers(socket, "") do
+          {:ok, _request} ->
+            send(parent, :reused_connection)
+            _ = :gen_tcp.send(socket, http_response("second"))
+
+          _ ->
+            :ok
+        end
+
+        :gen_tcp.close(socket)
+      end)
+
+    request = Finch.build(:get, "http://127.0.0.1:#{port}")
+
+    assert {:error, _} =
+             FinchClient.bounded_request(
+               request,
+               [finch_name: finch_name, admission: @admission, timeout: 50],
+               & &1
+             )
+
+    assert_receive :first_received
+
+    second_server =
+      spawn(fn ->
+        case :gen_tcp.accept(listener, 800) do
+          {:ok, socket} ->
+            {:ok, _request} = receive_headers(socket, "")
+            send(parent, :fresh_connection)
+            :ok = :gen_tcp.send(socket, http_response("second"))
+            :gen_tcp.close(socket)
+
+          {:error, :timeout} ->
+            :ok
+        end
+      end)
+
+    assert {:ok, %Finch.Response{body: "second"}} =
+             FinchClient.bounded_request(
+               request,
+               [finch_name: finch_name, admission: @admission, timeout: 500],
+               & &1
+             )
+
+    assert_receive :fresh_connection
+    refute_receive :reused_connection
+    assert_empty()
+    :gen_tcp.close(listener)
+    Process.exit(first_server, :kill)
+    Process.exit(second_server, :kill)
+  end
+
+  defp http_response(body) do
+    "HTTP/1.1 200 OK\r\ncontent-length: #{byte_size(body)}\r\nconnection: keep-alive\r\n\r\n" <>
+      body
+  end
+
   defp rpc(url, extra_opts \\ []) do
     FinchClient.request(
       %{url: url},
