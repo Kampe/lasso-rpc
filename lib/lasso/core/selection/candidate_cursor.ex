@@ -213,6 +213,15 @@ defmodule Lasso.RPC.Selection.CandidateCursor do
     }
   end
 
+  @spec pending?(t()) :: boolean()
+  def pending?(%__MODULE__{returned: returned, limit: limit}) when returned >= limit, do: false
+
+  def pending?(%__MODULE__{} = cursor) do
+    cursor.preferred != [] or cursor.descriptors != [] or cursor.deferred_ranking != nil or
+      deferred_pending?(cursor.supported_deferred) or
+      deferred_pending?(cursor.unsupported_deferred)
+  end
+
   @doc "Explains static exclusions from the captured selection plan without probing providers."
   @spec exhaustion_reason(t()) :: atom()
   def exhaustion_reason(%__MODULE__{} = cursor) do
@@ -244,6 +253,9 @@ defmodule Lasso.RPC.Selection.CandidateCursor do
         :no_eligible_providers
     end
   end
+
+  defp deferred_pending?(tiers),
+    do: Enum.any?(tiers, fn {_tier, queue} -> not :queue.is_empty(queue) end)
 
   @spec next(t()) :: {:ok, Channel.t(), t()} | :done | :stale
   def next(%__MODULE__{returned: returned, limit: limit}) when returned >= limit, do: :done

@@ -139,14 +139,15 @@ defmodule Lasso.RPC.ExecutionEnvelope do
 
   def admit_candidate(%__MODULE__{}, _now_us), do: {:error, :candidate_budget_exhausted}
 
-  @spec reserve_dispatch(t(), String.t(), :http | :ws, integer()) ::
+  @spec reserve_dispatch(t(), String.t(), :http | :ws, integer(), boolean()) ::
           {:ok, t(), pos_integer()}
           | {:error, :deadline_exhausted | :dispatch_budget_exhausted | :duplicate_dispatch}
   def reserve_dispatch(
         %__MODULE__{} = envelope,
         instance_id,
         transport,
-        now_us \\ System.monotonic_time(:microsecond)
+        now_us \\ System.monotonic_time(:microsecond),
+        fallback_available? \\ true
       ) do
     remaining_ms = remaining_ms(envelope, now_us)
     channel_key = {instance_id, transport}
@@ -168,7 +169,7 @@ defmodule Lasso.RPC.ExecutionEnvelope do
             dispatched_channels: MapSet.put(envelope.dispatched_channels, channel_key)
         }
 
-        {:ok, updated, attempt_timeout_ms(updated, remaining_ms)}
+        {:ok, updated, attempt_timeout_ms(updated, remaining_ms, fallback_available?)}
     end
   end
 
@@ -192,13 +193,14 @@ defmodule Lasso.RPC.ExecutionEnvelope do
   defp dispatch_limit(_safety), do: 1
 
   defp attempt_timeout_ms(
-         %__MODULE__{execution_safety: :replay_safe, dispatch_count: 1} = envelope,
-         remaining_ms
+         %__MODULE__{execution_safety: :replay_safe, dispatch_count: 1},
+         remaining_ms,
+         true
        ) do
-    min(remaining_ms, max(@minimum_attempt_ms, div(envelope.original_timeout_ms * 60, 100)))
+    min(remaining_ms, max(@minimum_attempt_ms, div(remaining_ms * 60, 100)))
   end
 
-  defp attempt_timeout_ms(_envelope, remaining_ms), do: remaining_ms
+  defp attempt_timeout_ms(_envelope, remaining_ms, _fallback_available?), do: remaining_ms
 
   defp replay_safe_read?(method) do
     MethodRegistry.method_category(method) in [
@@ -208,7 +210,7 @@ defmodule Lasso.RPC.ExecutionEnvelope do
       :node_admin,
       :eip1559,
       :eip4844,
-      :batch,
+      :extended_reads,
       :debug,
       :trace,
       :txpool

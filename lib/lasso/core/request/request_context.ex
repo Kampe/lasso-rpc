@@ -10,6 +10,8 @@ defmodule Lasso.RPC.RequestContext do
   - Result or error shapes
   """
 
+  alias Lasso.JSONRPC.Error, as: JError
+
   alias Lasso.RPC.{
     BoundedIdentifier,
     Channel,
@@ -58,6 +60,7 @@ defmodule Lasso.RPC.RequestContext do
           # Channel execution tracking (for observability without polluting return types)
           executed_channel: channel_identity() | nil,
           attempted_channels: [channel_attempt()],
+          last_attempt_error: JError.t() | nil,
 
           # Timing
           # Plug-level start time for true E2E measurement (from RequestTimingPlug)
@@ -121,6 +124,7 @@ defmodule Lasso.RPC.RequestContext do
             repeated_error_categories: %{},
             executed_channel: nil,
             attempted_channels: [],
+            last_attempt_error: nil,
             plug_start_time: nil,
             start_time: nil,
             request_start_ms: nil,
@@ -489,7 +493,12 @@ defmodule Lasso.RPC.RequestContext do
       code: code
     }
 
-    %{ctx | attempted_channels: ctx.attempted_channels ++ [attempt]}
+    %{
+      ctx
+      | attempted_channels: ctx.attempted_channels ++ [attempt],
+        last_attempt_error:
+          JError.from(error, provider_id: channel.provider_id, transport: channel.transport)
+    }
   end
 
   @doc """
