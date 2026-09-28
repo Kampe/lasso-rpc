@@ -25,6 +25,7 @@ defmodule Lasso.RPC.ChainSupervisor do
   require Logger
 
   alias Lasso.BlockSync
+  alias Lasso.Core.Support.DynamicSupervisorCall
   alias Lasso.Core.Streaming.{ClientSubscriptionRegistry, UpstreamSubscriptionPool}
   alias Lasso.Providers.{Catalog, InstanceState, ProbeCoordinator}
   alias Lasso.RPC.Transport.WebSocket.Connection, as: WSConnection
@@ -221,7 +222,7 @@ defmodule Lasso.RPC.ChainSupervisor do
   end
 
   defp ensure_probe_coordinator(chain_id) do
-    case DynamicSupervisor.start_child(
+    case DynamicSupervisorCall.start_child(
            Lasso.Providers.ProbeSupervisor,
            {ProbeCoordinator, chain_id}
          ) do
@@ -232,7 +233,7 @@ defmodule Lasso.RPC.ChainSupervisor do
   end
 
   defp start_instance_supervisor(instance_id) do
-    case DynamicSupervisor.start_child(
+    case DynamicSupervisorCall.start_child(
            Lasso.Providers.InstanceDynamicSupervisor,
            {Lasso.Providers.InstanceSupervisor, instance_id}
          ) do

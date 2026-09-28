@@ -8,6 +8,48 @@ defmodule Lasso.Integration.RuntimeProviderLifecycleTest do
   alias Lasso.Providers.{Catalog, InstanceSupervisor}
   alias Lasso.RPC.TransportRegistry
 
+  test "a stalled instance supervisor returns a bounded provider-start error" do
+    suffix = System.unique_integer([:positive])
+    chain_id = 900_000_000 + rem(suffix, 90_000_000)
+    provider_id = "start-stall-#{suffix}"
+
+    provider = %{
+      id: provider_id,
+      name: provider_id,
+      url: "http://127.0.0.1:1/#{suffix}"
+    }
+
+    assert :ok =
+             ConfigStore.register_chain_runtime("public", chain_id, %{
+               display_name: "Provider startup test",
+               providers: []
+             })
+
+    on_exit(fn ->
+      Providers.remove_provider(chain_id, provider_id)
+      ConfigStore.unregister_chain_runtime("public", chain_id)
+    end)
+
+    assert {:ok, ^provider_id} = Providers.add_provider(chain_id, provider, validate: false)
+    instance_id = Catalog.lookup_instance_id("public", chain_id, provider_id)
+    assert is_pid(GenServer.whereis(InstanceSupervisor.via_name(instance_id)))
+
+    supervisor = Process.whereis(Lasso.Providers.InstanceDynamicSupervisor)
+    :sys.suspend(supervisor)
+    on_exit(fn -> if Process.alive?(supervisor), do: :sys.resume(supervisor) end)
+
+    task =
+      Task.async(fn ->
+        Lasso.RPC.ChainSupervisor.ensure_provider("public", chain_id, provider)
+      end)
+
+    result = Task.yield(task, 4_000)
+    if is_nil(result), do: Task.shutdown(task, :brutal_kill)
+
+    assert {:ok, {:error, {:instance_supervisor_start_failed, {:supervisor_exit, :timeout}}}} =
+             result
+  end
+
   test "replacement waits for the removed provider's channels to close" do
     suffix = System.unique_integer([:positive])
     chain_id = 900_000_000 + rem(suffix, 90_000_000)
@@ -288,7 +330,14 @@ defmodule Lasso.Integration.RuntimeProviderLifecycleTest do
     assert {:error, {:runtime_reconcile_pending, _}} = Task.await(removal, 5_000)
     assert ConfigStore.get_provider("public", chain_id, removed_id) == {:error, :not_found}
 
+    # A previous integration case may have raised ConfigStore's global retry
+    # backoff above this test's deadline. Exercise the pending reconciliation
+    # directly after the supervisor is available again.
+    assert ConfigStore.status().runtime_reconcile_pending
+    state = :sys.get_state(ConfigStore)
+    Process.cancel_timer(state.runtime_reconcile_timer)
     :sys.resume(supervisor)
+    send(ConfigStore, :retry_runtime_reconcile)
 
     Lasso.Test.Eventually.assert_eventually(
       fn -> GenServer.whereis(InstanceSupervisor.via_name(instance_id)) == nil end,
