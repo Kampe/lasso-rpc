@@ -28,7 +28,7 @@ defmodule Lasso.RPC.Transport.HTTP.Client.Finch do
          {:ok, lease} <- acquire_admission(request, nil, opts) do
       try do
         request
-        |> stream_request(finch_name, request_options, lease)
+        |> stream_request(finch_name, request_options, lease, nil, nil)
         |> consumer.()
       after
         UpstreamAdmission.release(lease, :bounded_request_finished)
@@ -190,7 +190,16 @@ defmodule Lasso.RPC.Transport.HTTP.Client.Finch do
 
           outcome =
             try do
-              {:returned, finch_request(request, finch_name, request_options, opts, lease)}
+              {:returned,
+               finch_request(
+                 request,
+                 finch_name,
+                 request_options,
+                 opts,
+                 lease,
+                 context,
+                 tracker_token
+               )}
             rescue
               error -> {:raised, error}
             catch
@@ -241,10 +250,10 @@ defmodule Lasso.RPC.Transport.HTTP.Client.Finch do
     {:error, {:local_capacity_rejection, :dispatch_cancelled}}
   end
 
-  defp finch_request(request, finch_name, request_options, opts, lease) do
+  defp finch_request(request, finch_name, request_options, opts, lease, context, tracker_token) do
     case Keyword.get(opts, :request_fun) do
       nil ->
-        stream_request(request, finch_name, request_options, lease)
+        stream_request(request, finch_name, request_options, lease, context, tracker_token)
 
       request_fun when is_function(request_fun, 3) ->
         case request_fun.(request, finch_name, request_options) do
@@ -260,7 +269,7 @@ defmodule Lasso.RPC.Transport.HTTP.Client.Finch do
     end
   end
 
-  defp stream_request(request, finch_name, request_options, lease) do
+  defp stream_request(request, finch_name, request_options, lease, context, tracker_token) do
     response_limit = UpstreamAdmission.response_limit(lease.admission)
 
     initial = %{
@@ -295,7 +304,15 @@ defmodule Lasso.RPC.Transport.HTTP.Client.Finch do
         {:cont, %{acc | trailers: acc.trailers ++ trailers}}
     end
 
-    case stream_with_deadline(request, finch_name, initial, stream_fun, request_options) do
+    case stream_with_deadline(
+           request,
+           finch_name,
+           initial,
+           stream_fun,
+           request_options,
+           context,
+           tracker_token
+         ) do
       {:ok, %{error: nil} = acc} ->
         {:ok,
          %Finch.Response{
@@ -320,7 +337,15 @@ defmodule Lasso.RPC.Transport.HTTP.Client.Finch do
   # Mint 1.11 reports a receive timeout. Its unfinished response can then be
   # mistaken for the next request's response. Kill the checkout owner at our
   # deadline, before Finch's own receive timeout, so the checkout is discarded.
-  defp stream_with_deadline(request, finch_name, initial, stream_fun, request_options) do
+  defp stream_with_deadline(
+         request,
+         finch_name,
+         initial,
+         stream_fun,
+         request_options,
+         context,
+         tracker_token
+       ) do
     timeout_ms = Keyword.fetch!(request_options, :receive_timeout)
 
     finch_options =
@@ -330,27 +355,37 @@ defmodule Lasso.RPC.Transport.HTTP.Client.Finch do
 
     task =
       Task.async(fn ->
-        try do
-          {:returned, Finch.stream_while(request, finch_name, initial, stream_fun, finch_options)}
-        rescue
-          error -> {:raised, error, __STACKTRACE__}
-        catch
-          kind, reason -> {:caught, kind, reason, __STACKTRACE__}
-        end
+        DispatchTracker.inherit_attempt(context, tracker_token)
+
+        outcome =
+          try do
+            {:returned,
+             Finch.stream_while(request, finch_name, initial, stream_fun, finch_options)}
+          rescue
+            error -> {:raised, error, __STACKTRACE__}
+          catch
+            kind, reason -> {:caught, kind, reason, __STACKTRACE__}
+          end
+
+        {outcome, DispatchTracker.attempt_state(context)}
       end)
 
     case Task.yield(task, timeout_ms) do
-      {:ok, {:returned, result}} ->
+      {:ok, {{:returned, result}, state}} ->
+        DispatchTracker.merge_attempt(context, state)
         result
 
-      {:ok, {:raised, error, stacktrace}} ->
+      {:ok, {{:raised, error, stacktrace}, state}} ->
+        DispatchTracker.merge_attempt(context, state)
         reraise error, stacktrace
 
-      {:ok, {:caught, kind, reason, stacktrace}} ->
+      {:ok, {{:caught, kind, reason, stacktrace}, state}} ->
+        DispatchTracker.merge_attempt(context, state)
         :erlang.raise(kind, reason, stacktrace)
 
       nil ->
         _ = Task.shutdown(task, :brutal_kill)
+        DispatchTracker.merge_attempt(context, AttemptProtocol.dispatch_state(context))
         {:error, Finch.TransportError.exception(reason: :timeout), initial}
     end
   end

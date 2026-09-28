@@ -89,6 +89,18 @@ defmodule Lasso.Core.Transport.AttemptProtocol do
     gate_snapshot(gate, state)
   end
 
+  @doc "Reads dispatch evidence shared with the Finch checkout task without closing the gate."
+  @spec dispatch_state(context() | nil) :: :not_started | :started | :confirmed
+  def dispatch_state(nil), do: :not_started
+
+  def dispatch_state(%Context{gate: gate}) do
+    case :atomics.get(gate, 1) do
+      state when state in [@open_confirmed, @closed_confirmed] -> :confirmed
+      state when state in [@open_started, @closed_started] -> :started
+      _state -> :not_started
+    end
+  end
+
   @doc "Projects the gate snapshot into canonical dispatch observations."
   @spec gate_observations([map()], map()) :: [map()]
   def gate_observations(observations, snapshot) do

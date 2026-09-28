@@ -1333,45 +1333,14 @@ defmodule Lasso.Core.Streaming.UpstreamSubscriptionPool do
     {:noreply, state}
   end
 
-  # Async re-establishment after Manager restart (one per key, non-blocking)
+  # The coordinator owns replacement and replay; never block this pool waiting
+  # for a restarted manager's upstream subscribe call.
   def handle_info({:reestablish_after_restart, key, instance_id}, state) do
     new_state =
       case Map.get(state.keys, key) do
         %{instance_id: ^instance_id, status: :active} = entry ->
           InstanceSubscriptionRegistry.register_consumer(instance_id, entry.subscription_key)
-
-          case InstanceSubscriptionManager.ensure_subscription(
-                 instance_id,
-                 entry.subscription_key
-               ) do
-            {:ok, _status} ->
-              Logger.debug("Re-established subscription after Manager restart",
-                chain_id: state.chain_id,
-                key: inspect(key),
-                instance_id: instance_id
-              )
-
-              state
-
-            {:error, reason} ->
-              Logger.warning("Failed to re-establish subscription after Manager restart",
-                chain_id: state.chain_id,
-                key: inspect(key),
-                instance_id: instance_id,
-                reason: inspect(reason)
-              )
-
-              if entry.provider_constraint and transient_subscription_error?(reason) do
-                retry_constrained_subscription(state, key)
-              else
-                dispatch_failover(
-                  state,
-                  key,
-                  entry.primary_provider_id,
-                  pick_next_provider(state, key, entry.primary_provider_id)
-                )
-              end
-          end
+          dispatch_failover(state, key, entry.primary_provider_id, entry.primary_provider_id)
 
         _ ->
           state
@@ -1424,48 +1393,14 @@ defmodule Lasso.Core.Streaming.UpstreamSubscriptionPool do
     end)
   end
 
-  # Staleness: resubscribe to same instance
   defp handle_subscription_invalidation(
          state,
          provider_id,
-         instance_id,
+         _instance_id,
          pool_key,
          :subscription_stale
        ) do
-    entry = state.keys[pool_key]
-
-    Logger.info("Subscription stale, resubscribing to same instance",
-      chain_id: state.chain_id,
-      provider_id: provider_id,
-      instance_id: instance_id,
-      key: inspect(pool_key)
-    )
-
-    case InstanceSubscriptionManager.ensure_subscription(instance_id, entry.subscription_key) do
-      {:ok, _status} ->
-        Logger.debug("Resubscribed after staleness",
-          chain_id: state.chain_id,
-          instance_id: instance_id,
-          key: inspect(pool_key)
-        )
-
-        state
-
-      {:error, reason} ->
-        Logger.warning("Resubscription failed after staleness, failing over",
-          chain_id: state.chain_id,
-          provider_id: provider_id,
-          key: inspect(pool_key),
-          reason: inspect(reason)
-        )
-
-        dispatch_failover(
-          state,
-          pool_key,
-          provider_id,
-          pick_next_provider(state, pool_key, provider_id)
-        )
-    end
+    dispatch_failover(state, pool_key, provider_id, provider_id)
   end
 
   defp handle_subscription_invalidation(state, provider_id, _instance_id, pool_key, reason) do
@@ -1650,42 +1585,6 @@ defmodule Lasso.Core.Streaming.UpstreamSubscriptionPool do
       entry ->
         updated = %{entry | refcount: entry.refcount - 1}
         %{state | keys: Map.put(state.keys, pool_key, updated)}
-    end
-  end
-
-  defp transient_subscription_error?(reason)
-       when reason in [:connection_unknown, :not_connected, :timeout, :noproc],
-       do: true
-
-  defp transient_subscription_error?(%JError{retriable?: true}), do: true
-  defp transient_subscription_error?(_reason), do: false
-
-  defp retry_constrained_subscription(state, pool_key),
-    do: retry_pending_subscription(state, pool_key)
-
-  defp retry_pending_subscription(state, pool_key) do
-    case Map.get(state.keys, pool_key) do
-      nil ->
-        state
-
-      entry ->
-        release_entry_upstreams(state, pool_key, entry)
-        generation = make_ref()
-
-        updated = %{
-          entry
-          | status: :establishing,
-            primary_provider_id: nil,
-            instance_id: nil,
-            establishment_generation: generation,
-            readiness_retries: 0,
-            retry_token: nil,
-            transient_excluded_providers: MapSet.new()
-        }
-
-        new_state = %{state | keys: Map.put(state.keys, pool_key, updated)}
-        {:noreply, scheduled_state} = retry_readiness(new_state, pool_key, generation, [])
-        scheduled_state
     end
   end
 
