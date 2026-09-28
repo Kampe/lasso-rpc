@@ -680,7 +680,8 @@ defmodule Lasso.RPC.RequestPipeline do
            ctx.execution_envelope,
            instance_id,
            channel.transport,
-           reserved_at_us
+           reserved_at_us,
+           fallback_channel_available?(rest_channels)
          ) do
       {:ok, envelope, attempt_timeout_ms} ->
         attempt_deadline_us =
@@ -707,6 +708,12 @@ defmodule Lasso.RPC.RequestPipeline do
       do: min(ctx.execution_envelope.deadline_us, ctx.exploration_token.attempt_deadline_us),
       else: ctx.execution_envelope.deadline_us
   end
+
+  defp fallback_channel_available?(%CandidateCursor{} = cursor),
+    do: CandidateCursor.pending?(cursor)
+
+  defp fallback_channel_available?([]), do: false
+  defp fallback_channel_available?(_candidates), do: true
 
   defp execute_owned_channel(
          channel,
@@ -1330,6 +1337,9 @@ defmodule Lasso.RPC.RequestPipeline do
   end
 
   defp finalize_dispatch_exhaustion(%{head_policy: %{last_error: %JError{} = error}} = ctx),
+    do: finalize_error(%{error | retriable?: false}, ctx)
+
+  defp finalize_dispatch_exhaustion(%RequestContext{last_attempt_error: %JError{} = error} = ctx),
     do: finalize_error(%{error | retriable?: false}, ctx)
 
   defp finalize_dispatch_exhaustion(
