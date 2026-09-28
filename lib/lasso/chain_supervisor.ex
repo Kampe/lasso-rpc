@@ -158,31 +158,39 @@ defmodule Lasso.RPC.ChainSupervisor do
 
   @spec remove_provider(String.t(), pos_integer(), String.t(), String.t() | nil) ::
           :ok | {:error, term()}
-  def remove_provider(profile, chain_id, provider_id, instance_id)
+  def remove_provider(profile, chain_id, provider_id, _instance_id)
       when is_binary(profile) and is_integer(chain_id) and chain_id > 0 do
-    TransportRegistry.close_channel(profile, chain_id, provider_id, :http)
-    TransportRegistry.close_channel(profile, chain_id, provider_id, :ws)
+    remove_provider(profile, chain_id, provider_id, nil, :infinity)
+  end
 
-    # The ConfigStore mutation has already completed. Rebuilding now makes the
-    # removed provider unavailable to routing before shared-instance cleanup
-    # decides whether its physical state is still referenced by another profile.
-    Catalog.build_from_config()
+  @spec remove_provider(
+          String.t(),
+          pos_integer(),
+          String.t(),
+          String.t() | nil,
+          non_neg_integer() | :infinity
+        ) :: :ok | {:error, term()}
+  def remove_provider(profile, chain_id, provider_id, _instance_id, max_generation)
+      when is_binary(profile) and is_integer(chain_id) and chain_id > 0 do
+    results =
+      for transport <- [:http, :ws] do
+        TransportRegistry.close_channel_sync(
+          profile,
+          chain_id,
+          provider_id,
+          transport,
+          max_generation
+        )
+      end
 
-    if instance_id && Catalog.get_instance_refs(instance_id) == [] do
-      BlockSync.Supervisor.stop_worker(chain_id, instance_id)
-      stop_instance_supervisor(instance_id)
-      InstanceState.clear(instance_id)
-      Lasso.BlockSync.Registry.remove_instance(chain_id, instance_id)
+    case Enum.find(results, &match?({:error, _}, &1)) do
+      nil ->
+        Logger.info("Successfully removed provider #{provider_id} from chain #{chain_id}")
+        :ok
+
+      error ->
+        error
     end
-
-    if Catalog.list_instances_for_chain(chain_id) == [] do
-      stop_probe_coordinator(chain_id)
-    else
-      ProbeCoordinator.reload_instances(chain_id)
-    end
-
-    Logger.info("Successfully removed provider #{provider_id} from chain #{chain_id}")
-    :ok
   end
 
   # Supervisor callbacks
@@ -205,30 +213,10 @@ defmodule Lasso.RPC.ChainSupervisor do
     {:via, Registry, {Lasso.Registry, {:chain_supervisor, profile, chain_id}}}
   end
 
-  defp stop_instance_supervisor(instance_id) do
-    case GenServer.whereis(Lasso.Providers.InstanceSupervisor.via_name(instance_id)) do
-      nil -> :ok
-      pid -> DynamicSupervisor.terminate_child(Lasso.Providers.InstanceDynamicSupervisor, pid)
-    end
-  end
-
   defp start_block_sync_worker(chain_id, instance_id) do
     case BlockSync.Supervisor.start_worker(chain_id, instance_id) do
       {:ok, _pid} -> :ok
       {:error, reason} -> {:error, {:block_sync_start_failed, reason}}
-    end
-  end
-
-  defp stop_probe_coordinator(chain_id) do
-    case GenServer.whereis(ProbeCoordinator.via_name(chain_id)) do
-      nil ->
-        :ok
-
-      pid ->
-        case DynamicSupervisor.terminate_child(Lasso.Providers.ProbeSupervisor, pid) do
-          :ok -> :ok
-          {:error, :not_found} -> :ok
-        end
     end
   end
 

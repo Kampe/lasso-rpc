@@ -73,4 +73,26 @@ defmodule Lasso.BlockSync.Supervisor do
     |> Enum.map(fn {_, pid, _, _} -> pid end)
     |> Enum.reject(&is_nil/1)
   end
+
+  @doc "Returns running worker identities independently of the current catalog snapshot."
+  @spec list_worker_keys() :: {:ok, [{pos_integer(), String.t()}]} | {:error, term()}
+  def list_worker_keys do
+    @dynamic_supervisor
+    |> GenServer.call(:which_children, 2_000)
+    |> Enum.flat_map(fn
+      {_, pid, _, _} when is_pid(pid) ->
+        Lasso.Registry
+        |> Registry.keys(pid)
+        |> Enum.flat_map(fn
+          {:block_sync_worker, chain_id, instance_id} -> [{chain_id, instance_id}]
+          _ -> []
+        end)
+
+      _ ->
+        []
+    end)
+    |> then(&{:ok, &1})
+  catch
+    :exit, reason -> {:error, {:supervisor_exit, reason}}
+  end
 end

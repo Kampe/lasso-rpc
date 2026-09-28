@@ -28,6 +28,9 @@ defmodule Lasso.Application do
     # TransportRegistry channel cache - enables lockless reads in Selection hot path
     :ets.new(:transport_channel_cache, [:named_table, :public, :set, read_concurrency: true])
 
+    # Pending channel closes survive a ConfigStore restart during runtime removal.
+    :ets.new(:lasso_runtime_provider_cleanup, [:named_table, :public, :set])
+
     # Shared provider instance state (health, circuit, rate limits)
     # Written by ProbeCoordinator, CircuitBreaker, Observability; read by CandidateListing
     :ets.new(:lasso_instance_state, [

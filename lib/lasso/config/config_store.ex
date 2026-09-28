@@ -36,10 +36,13 @@ defmodule Lasso.Config.ConfigStore do
   alias Lasso.Config.ChainConfig.Provider
   alias Lasso.Config.ConfigStore.Owner
   alias Lasso.Config.ProfileMeta
+  alias Lasso.Core.Streaming.InstanceEventBus
   alias Lasso.Core.Support.DynamicSupervisorCall
   alias Lasso.Providers.ProviderHeaders
+  alias Lasso.RPC.ChainSupervisor
 
   @persistent_term_key :lasso_config_store_active
+  @pending_cleanup_table :lasso_runtime_provider_cleanup
   @default_profile Lasso.Config.ProfileValidator.default_profile()
 
   # CONCURRENCY-2: how long the OLD ETS table sticks around after the
@@ -550,7 +553,8 @@ defmodule Lasso.Config.ConfigStore do
       when is_binary(profile_id) and is_integer(chain_id) and chain_id > 0 do
     GenServer.call(
       __MODULE__,
-      {:register_provider_runtime, profile_id, chain_id, provider_attrs}
+      {:register_provider_runtime, profile_id, chain_id, provider_attrs},
+      15_000
     )
   end
 
@@ -571,7 +575,8 @@ defmodule Lasso.Config.ConfigStore do
       when is_binary(profile_id) and is_integer(chain_id) and is_binary(provider_id) do
     GenServer.call(
       __MODULE__,
-      {:unregister_provider_runtime, profile_id, chain_id, provider_id}
+      {:unregister_provider_runtime, profile_id, chain_id, provider_id},
+      :infinity
     )
   end
 
@@ -662,6 +667,10 @@ defmodule Lasso.Config.ConfigStore do
       runtime_reconcile_attempt: 0,
       runtime_supervisor_monitors: monitor_runtime_supervisors(%{})
     }
+
+    if :ets.first(@pending_cleanup_table) != :"$end_of_table" do
+      send(self(), {:runtime_reconcile_needed, :pending_provider_cleanup})
+    end
 
     {:ok, state}
   end
@@ -814,13 +823,22 @@ defmodule Lasso.Config.ConfigStore do
       ) do
     with {:ok, chain_config} <- get_chain(profile_id, chain_id),
          {:ok, updated_chain} <- remove_provider_from_chain(chain_config, provider_id) do
+      instance_id = Lasso.Providers.Catalog.lookup_instance_id(profile_id, chain_id, provider_id)
+      cleanup_key = {profile_id, chain_id, provider_id}
+      old_generation = route_generation()
+      :ets.insert(@pending_cleanup_table, {cleanup_key, {instance_id, old_generation}})
       update_chain_in_profile(profile_id, chain_id, updated_chain)
+
+      publication = rebuild_shared_infrastructure(list_chain_ids())
+      runtime_provider_removal_barrier()
+      cleanup = reconcile_provider_cleanup(cleanup_key, {instance_id, old_generation})
 
       Logger.debug(
         "Unregistered provider #{provider_id} from chain #{chain_id} in profile #{profile_id} (runtime)"
       )
 
-      {:reply, :ok, mark_runtime_dirty(state, profile_id, :ok)}
+      result = runtime_reconcile_status([publication, cleanup])
+      {:reply, result, mark_runtime_dirty(state, profile_id, result)}
     else
       {:error, :not_found} -> {:reply, {:error, :chain_not_found}, state}
       {:error, :provider_not_found} -> {:reply, {:error, :provider_not_found}, state}
@@ -1006,8 +1024,9 @@ defmodule Lasso.Config.ConfigStore do
 
     monitors = monitor_runtime_supervisors(state.runtime_supervisor_monitors)
     publication = rebuild_shared_infrastructure(list_chain_ids())
+    cleanup = reconcile_pending_provider_cleanup()
     chain_results = ensure_all_profile_chain_supervisors()
-    result = runtime_reconcile_status([publication | chain_results])
+    result = runtime_reconcile_status([publication, cleanup | chain_results])
     attempt = if result == :ok, do: 0, else: state.runtime_reconcile_attempt
 
     {:noreply,
@@ -2301,7 +2320,7 @@ defmodule Lasso.Config.ConfigStore do
   #   - Update / remove / reload paths: pass the chain list captured BEFORE
   #     the mutation so removed chains tear down cleanly.
   defp rebuild_shared_infrastructure(old_chain_ids) do
-    alias Lasso.Providers.{Catalog, InstanceSupervisor, ProbeCoordinator}
+    alias Lasso.Providers.Catalog
 
     old_instances = Catalog.list_all_instance_ids()
     old_instance_chain_ids = snapshot_instance_chain_ids(old_instances)
@@ -2310,67 +2329,27 @@ defmodule Lasso.Config.ConfigStore do
 
     new_instances = Catalog.list_all_instance_ids()
     new_chain_ids = list_chain_ids()
+    removed_instances = old_instances -- new_instances
 
-    instance_starts =
-      for instance_id <- new_instances do
-        case DynamicSupervisorCall.start_child(
-               Lasso.Providers.InstanceDynamicSupervisor,
-               {InstanceSupervisor, instance_id}
-             ) do
-          {:ok, _} -> :ok
-          :ignore -> :ok
-          {:error, {:already_started, _}} -> :ok
-          {:error, _} = error -> track_runtime_reconcile_result(error, :instance_start)
-        end
+    Enum.each(removed_instances, fn instance_id ->
+      if chain_id = Map.get(old_instance_chain_ids, instance_id) do
+        InstanceEventBus.broadcast(
+          Lasso.Topics.instance_sub_manager_restarted(chain_id),
+          {:instance_sub_manager_restarted, instance_id}
+        )
       end
+    end)
 
-    instance_stops =
-      for instance_id <- old_instances -- new_instances do
-        result =
-          case GenServer.whereis(InstanceSupervisor.via_name(instance_id)) do
-            nil ->
-              :ok
+    probe_chain_ids =
+      Enum.filter(new_chain_ids, fn chain_id ->
+        Catalog.list_instances_for_chain(chain_id) != []
+      end)
 
-            pid ->
-              DynamicSupervisorCall.terminate_child(
-                Lasso.Providers.InstanceDynamicSupervisor,
-                pid
-              )
-              |> track_runtime_reconcile_result(:instance_stop)
-          end
+    {instance_starts, instance_stops} =
+      reconcile_instance_supervisors(new_instances, removed_instances)
 
-        Lasso.Providers.InstanceState.clear(instance_id)
-        result
-      end
-
-    probe_starts =
-      for chain_id <- new_chain_ids do
-        case DynamicSupervisorCall.start_child(
-               Lasso.Providers.ProbeSupervisor,
-               {ProbeCoordinator, chain_id}
-             ) do
-          {:ok, _} -> :ok
-          {:error, {:already_started, _}} -> ProbeCoordinator.reload_instances(chain_id)
-          {:error, _} = error -> track_runtime_reconcile_result(error, :probe_start)
-          _ -> :ok
-        end
-      end
-
-    probe_stops =
-      for chain_id <- old_chain_ids -- new_chain_ids do
-        result =
-          case GenServer.whereis(ProbeCoordinator.via_name(chain_id)) do
-            nil ->
-              :ok
-
-            pid ->
-              DynamicSupervisorCall.terminate_child(Lasso.Providers.ProbeSupervisor, pid)
-              |> track_runtime_reconcile_result(:probe_stop)
-          end
-
-        Lasso.Providers.RestartCounter.clear({:probe_coord, chain_id})
-        result
-      end
+    {probe_starts, probe_stops} =
+      reconcile_probe_coordinators(old_chain_ids, probe_chain_ids)
 
     block_sync = reconcile_block_sync_workers(old_instances, old_instance_chain_ids)
 
@@ -2387,6 +2366,122 @@ defmodule Lasso.Config.ConfigStore do
       {:error, {:runtime_reconcile_pending, reason}}
   end
 
+  defp reconcile_instance_supervisors(new_instances, removed_instances) do
+    alias Lasso.Providers.InstanceSupervisor
+
+    case DynamicSupervisorCall.children(Lasso.Providers.InstanceDynamicSupervisor) do
+      {:ok, children} ->
+        running_instances =
+          for {_, pid, _, _} <- children,
+              is_pid(pid),
+              {:instance_supervisor, instance_id} <- Registry.keys(Lasso.Registry, pid),
+              do: instance_id
+
+        stale_instances = Enum.uniq(removed_instances ++ (running_instances -- new_instances))
+
+        starts =
+          bounded_reconcile(new_instances, fn instance_id ->
+            case DynamicSupervisorCall.start_child(
+                   Lasso.Providers.InstanceDynamicSupervisor,
+                   {InstanceSupervisor, instance_id}
+                 ) do
+              {:ok, _} -> :ok
+              :ignore -> :ok
+              {:error, {:already_started, _}} -> :ok
+              {:error, _} = error -> track_runtime_reconcile_result(error, :instance_start)
+            end
+          end)
+
+        stops =
+          if Enum.any?(starts, &match?({:error, _}, &1)) do
+            []
+          else
+            bounded_reconcile(stale_instances, fn instance_id ->
+              result =
+                case GenServer.whereis(InstanceSupervisor.via_name(instance_id)) do
+                  nil ->
+                    :ok
+
+                  pid ->
+                    DynamicSupervisorCall.terminate_child(
+                      Lasso.Providers.InstanceDynamicSupervisor,
+                      pid
+                    )
+                    |> track_runtime_reconcile_result(:instance_stop)
+                end
+
+              Lasso.Providers.InstanceState.clear(instance_id)
+              result
+            end)
+          end
+
+        {starts, stops}
+
+      {:error, _} = error ->
+        {[track_runtime_reconcile_result(error, :instance_supervisor)], []}
+    end
+  end
+
+  defp reconcile_probe_coordinators(old_chain_ids, desired_chain_ids) do
+    alias Lasso.Providers.ProbeCoordinator
+
+    case DynamicSupervisorCall.children(Lasso.Providers.ProbeSupervisor) do
+      {:ok, children} ->
+        running_chains =
+          for {_, pid, _, _} <- children,
+              is_pid(pid),
+              {:probe_coordinator, chain_id} <- Registry.keys(Lasso.Registry, pid),
+              do: chain_id
+
+        stale_chains =
+          Enum.uniq((old_chain_ids -- desired_chain_ids) ++ (running_chains -- desired_chain_ids))
+
+        starts =
+          bounded_reconcile(desired_chain_ids, fn chain_id ->
+            case DynamicSupervisorCall.start_child(
+                   Lasso.Providers.ProbeSupervisor,
+                   {ProbeCoordinator, chain_id}
+                 ) do
+              {:ok, _} -> :ok
+              {:error, {:already_started, _}} -> ProbeCoordinator.reload_instances(chain_id)
+              {:error, _} = error -> track_runtime_reconcile_result(error, :probe_start)
+              _ -> :ok
+            end
+          end)
+
+        stops =
+          if Enum.any?(starts, &match?({:error, _}, &1)) do
+            []
+          else
+            bounded_reconcile(stale_chains, &stop_stale_probe_coordinator/1)
+          end
+
+        {starts, stops}
+
+      {:error, _} = error ->
+        {[track_runtime_reconcile_result(error, :probe_supervisor)], []}
+    end
+  end
+
+  defp stop_stale_probe_coordinator(chain_id) do
+    alias Lasso.Providers.ProbeCoordinator
+
+    result =
+      case GenServer.whereis(ProbeCoordinator.via_name(chain_id)) do
+        nil ->
+          :ok
+
+        pid ->
+          case DynamicSupervisorCall.terminate_child(Lasso.Providers.ProbeSupervisor, pid) do
+            {:error, :not_found} -> :ok
+            result -> track_runtime_reconcile_result(result, :probe_stop)
+          end
+      end
+
+    Lasso.Providers.RestartCounter.clear({:probe_coord, chain_id})
+    result
+  end
+
   defp snapshot_instance_chain_ids(instance_ids) do
     alias Lasso.Providers.Catalog
 
@@ -2399,48 +2494,55 @@ defmodule Lasso.Config.ConfigStore do
   end
 
   defp reconcile_block_sync_workers(old_instances, old_instance_chain_ids) do
+    case Lasso.BlockSync.Supervisor.list_worker_keys() do
+      {:ok, running_keys} ->
+        reconcile_block_sync_workers(old_instances, old_instance_chain_ids, running_keys)
+
+      {:error, _} = error ->
+        [track_runtime_reconcile_result(error, :block_sync_list)]
+    end
+  end
+
+  defp reconcile_block_sync_workers(old_instances, old_instance_chain_ids, running_keys) do
     alias Lasso.Providers.Catalog
 
     new_instances = Catalog.list_all_instance_ids()
     added = new_instances -- old_instances
-    removed = old_instances -- new_instances
     retained = new_instances -- added
+
+    desired =
+      for instance_id <- new_instances,
+          {:ok, %{chain_id: chain_id}} <- [Catalog.get_instance(instance_id)],
+          do: {chain_id, instance_id}
+
+    removed_from_catalog =
+      for instance_id <- old_instances -- new_instances,
+          chain_id = Map.get(old_instance_chain_ids, instance_id),
+          is_integer(chain_id),
+          do: {chain_id, instance_id}
+
+    removed = Enum.uniq((running_keys -- desired) ++ removed_from_catalog)
 
     # Reap dropped instances before spawning new ones to enforce the
     # probe-intensity contract: no window where two workers for the same
     # provider URL run concurrently (auth rotation scenario).
     stops =
-      for instance_id <- removed do
+      for {chain_id, instance_id} <- removed do
         result =
-          case Map.get(old_instance_chain_ids, instance_id) do
-            nil ->
-              :ok
+          chain_id
+          |> Lasso.BlockSync.Supervisor.stop_worker(instance_id)
+          |> track_runtime_reconcile_result(:block_sync_stop)
 
-            chain_id ->
-              result =
-                chain_id
-                |> Lasso.BlockSync.Supervisor.stop_worker(instance_id)
-                |> track_runtime_reconcile_result(:block_sync_stop)
-
-              Lasso.BlockSync.Registry.remove_instance(chain_id, instance_id)
-              result
-          end
-
+        Lasso.BlockSync.Registry.remove_instance(chain_id, instance_id)
         Lasso.Providers.RestartCounter.clear({:block_sync, instance_id})
         result
       end
 
     starts =
-      for instance_id <- new_instances do
-        case Catalog.get_instance(instance_id) do
-          {:ok, %{chain_id: chain_id}} ->
-            chain_id
-            |> Lasso.BlockSync.Supervisor.start_worker(instance_id)
-            |> track_runtime_reconcile_result(:block_sync_start)
-
-          _ ->
-            :ok
-        end
+      for {chain_id, instance_id} <- desired do
+        chain_id
+        |> Lasso.BlockSync.Supervisor.start_worker(instance_id)
+        |> track_runtime_reconcile_result(:block_sync_start)
       end
 
     # Single signal: retained instances whose ref set or config may have
@@ -2492,6 +2594,98 @@ defmodule Lasso.Config.ConfigStore do
   end
 
   defp track_runtime_reconcile_result(result, _operation), do: result
+
+  defp reconcile_pending_provider_cleanup do
+    @pending_cleanup_table
+    |> :ets.tab2list()
+    |> Enum.map(fn {key, pending} -> reconcile_provider_cleanup(key, pending) end)
+    |> runtime_reconcile_status()
+  end
+
+  defp reconcile_provider_cleanup(
+         {profile_id, chain_id, provider_id} = key,
+         {instance_id, generation}
+       ) do
+    with :ok <- notify_removed_provider_alias(key, instance_id),
+         :ok <-
+           ChainSupervisor.remove_provider(
+             profile_id,
+             chain_id,
+             provider_id,
+             instance_id,
+             generation
+           ) do
+      complete_provider_cleanup(:ok, key)
+    else
+      {:error, _reason} = error -> complete_provider_cleanup(error, key)
+    end
+  end
+
+  defp notify_removed_provider_alias({profile_id, chain_id, provider_id}, old_instance_id) do
+    current_instance_id =
+      Lasso.Providers.Catalog.lookup_instance_id(profile_id, chain_id, provider_id)
+
+    case {get_provider(profile_id, chain_id, provider_id), current_instance_id} do
+      {{:error, :not_found}, nil} ->
+        broadcast_removed_provider_alias(profile_id, chain_id, provider_id, old_instance_id)
+
+      {{:ok, _provider}, instance_id} when is_binary(instance_id) ->
+        if instance_id == old_instance_id do
+          :ok
+        else
+          broadcast_removed_provider_alias(profile_id, chain_id, provider_id, old_instance_id)
+        end
+
+      _ ->
+        {:error, {:provider_alias_publication_pending, profile_id, chain_id, provider_id}}
+    end
+  end
+
+  defp broadcast_removed_provider_alias(profile_id, chain_id, provider_id, instance_id) do
+    InstanceEventBus.broadcast(
+      Lasso.Topics.instance_sub_manager_restarted(chain_id),
+      {:runtime_provider_removed, profile_id, provider_id, instance_id}
+    )
+
+    :ok
+  end
+
+  defp runtime_provider_removal_barrier do
+    case Application.get_env(:lasso, :runtime_provider_removal_barrier) do
+      {observer, ref} when is_pid(observer) and is_reference(ref) ->
+        send(observer, {:runtime_provider_removal_published, self(), ref})
+
+        receive do
+          {:runtime_provider_removal_continue, ^ref} -> :ok
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp complete_provider_cleanup(:ok, key) do
+    :ets.delete(@pending_cleanup_table, key)
+    :ok
+  end
+
+  defp complete_provider_cleanup({:error, _reason} = error, _key) do
+    track_runtime_reconcile_result(error, :provider_channel_cleanup)
+  end
+
+  defp bounded_reconcile(items, operation) do
+    items
+    |> Enum.reduce_while([], fn item, results ->
+      result = operation.(item)
+
+      if match?({:error, _}, result) do
+        {:halt, [result | results]}
+      else
+        {:cont, [result | results]}
+      end
+    end)
+    |> Enum.reverse()
+  end
 
   defp runtime_reconcile_status(results) do
     case Enum.find(results, &match?({:error, _}, &1)) do

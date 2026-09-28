@@ -116,10 +116,15 @@ defmodule Lasso.Config.ConfigStoreSupervisorRecoveryTest do
     assert {:ok, _pid} = Supervisor.restart_child(Lasso.Supervisor, supervisor)
     instance_id = Catalog.lookup_instance_id(spec.profile_id, chain_id, provider_id)
 
-    assert_eventually(fn ->
-      is_pid(GenServer.whereis(Worker.via(chain_id, instance_id))) and
-        not ConfigStore.status().runtime_reconcile_pending
-    end)
+    # Earlier pending operations can leave the exponential retry timer above
+    # this file's default 2.5-second window during a full suite run.
+    assert_eventually(
+      fn ->
+        is_pid(GenServer.whereis(Worker.via(chain_id, instance_id))) and
+          not ConfigStore.status().runtime_reconcile_pending
+      end,
+      700
+    )
   end
 
   defp profile_spec do

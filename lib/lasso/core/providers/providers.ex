@@ -9,7 +9,7 @@ defmodule Lasso.Providers do
   require Logger
   alias Lasso.Config.{ConfigStore, ConfigValidator}
   alias Lasso.Providers.{Catalog, InstanceState}
-  alias Lasso.RPC.ChainSupervisor
+  alias Lasso.RPC.{ChainSupervisor, TransportRegistry}
 
   @default_profile Lasso.Config.ProfileValidator.default_profile()
 
@@ -48,18 +48,15 @@ defmodule Lasso.Providers do
     provider_id = Map.get(provider_config, :id)
 
     result =
-      with {:ok, chain_id} <- resolve_chain_id(profile, chain_identifier),
-           :ok <- maybe_validate(provider_config, validate?),
-           :ok <- ensure_chain_started(profile, chain_id),
-           :ok <- check_not_duplicate(profile, chain_id, provider_id),
-           :ok <- ConfigStore.register_provider_runtime(profile, chain_id, provider_config) do
-        finish_provider_add(
-          profile,
-          chain_id,
-          provider_config,
-          start_ws,
-          persist?
-        )
+      with {:ok, chain_id} <- resolve_chain_id(profile, chain_identifier) do
+        with_provider_lifecycle(chain_id, fn ->
+          with :ok <- maybe_validate(provider_config, validate?),
+               :ok <- ensure_chain_started(profile, chain_id),
+               :ok <- check_not_duplicate(profile, chain_id, provider_id),
+               :ok <- ConfigStore.register_provider_runtime(profile, chain_id, provider_config) do
+            finish_provider_add(profile, chain_id, provider_config, start_ws, persist?)
+          end
+        end)
       end
 
     case result do
@@ -88,15 +85,19 @@ defmodule Lasso.Providers do
   def remove_provider(profile, chain_identifier, provider_id, opts \\ []) do
     persist? = Keyword.get(opts, :persist, false)
 
-    with {:ok, chain_id} <- resolve_chain_id(profile, chain_identifier),
-         {:ok, _provider} <- ConfigStore.get_provider(profile, chain_id, provider_id),
-         instance_id = Catalog.lookup_instance_id(profile, chain_id, provider_id),
-         :ok <- ConfigStore.unregister_provider_runtime(profile, chain_id, provider_id),
-         :ok <- ChainSupervisor.remove_provider(profile, chain_id, provider_id, instance_id),
-         :ok <- maybe_persist_remove(chain_id, provider_id, persist?) do
-      Logger.info("Successfully removed provider #{provider_id} from chain #{chain_id}")
-      :ok
-    else
+    result =
+      with {:ok, chain_id} <- resolve_chain_id(profile, chain_identifier) do
+        with_provider_lifecycle(chain_id, fn ->
+          with {:ok, _provider} <- ConfigStore.get_provider(profile, chain_id, provider_id) do
+            remove_registered_provider(profile, chain_id, provider_id, persist?)
+          end
+        end)
+      end
+
+    case result do
+      :ok ->
+        :ok
+
       {:error, :provider_not_found} ->
         :ok
 
@@ -112,6 +113,38 @@ defmodule Lasso.Providers do
     end
   end
 
+  defp remove_registered_provider(profile, chain_id, provider_id, persist?) do
+    case ConfigStore.unregister_provider_runtime(profile, chain_id, provider_id) do
+      :ok ->
+        finalize_remove(chain_id, provider_id, persist?)
+
+      {:error, {:runtime_reconcile_pending, _}} = pending ->
+        case finalize_remove(chain_id, provider_id, persist?) do
+          :ok -> pending
+          error -> error
+        end
+
+      error ->
+        error
+    end
+  end
+
+  defp finalize_remove(chain_id, provider_id, persist?) do
+    with :ok <- maybe_persist_remove(chain_id, provider_id, persist?) do
+      Logger.info("Successfully removed provider #{provider_id} from chain #{chain_id}")
+      :ok
+    end
+  end
+
+  defp with_provider_lifecycle(chain_id, operation) when is_function(operation, 0) do
+    lock = {{__MODULE__, :provider_lifecycle, chain_id}, self()}
+
+    case :global.trans(lock, operation, [node()]) do
+      :aborted -> {:error, :provider_lifecycle_unavailable}
+      result -> result
+    end
+  end
+
   @spec update_provider(chain_identifier(), String.t(), map(), keyword()) ::
           :ok | {:error, term()}
   def update_provider(chain_name, provider_id, updates, opts \\ []) do
@@ -124,10 +157,12 @@ defmodule Lasso.Providers do
     persist? = Keyword.get(opts, :persist, false)
 
     with {:ok, existing} <- get_provider(profile, chain_name, provider_id),
-         updated_config = Map.merge(existing, normalize_provider_config(updates)),
+         updated_config = Map.merge(existing, normalize_provider_updates(updates)),
          :ok <- maybe_validate(updated_config, true),
-         :ok <- remove_provider(profile, chain_name, provider_id, persist: false),
-         {:ok, _} <- add_provider(profile, chain_name, updated_config, persist: persist?) do
+         {:ok, chain_id} <- resolve_chain_id(profile, chain_name),
+         :ok <- close_provider_channels_before_update(profile, chain_id, provider_id),
+         :ok <- remove_for_update(profile, chain_name, provider_id),
+         :ok <- replace_removed_provider(profile, chain_name, existing, updated_config, persist?) do
       Logger.info("Successfully updated provider #{provider_id} in #{chain_name}")
       :ok
     else
@@ -136,6 +171,36 @@ defmodule Lasso.Providers do
           "Failed to update provider #{provider_id} in #{chain_name}: #{inspect(reason)}"
         )
 
+        error
+    end
+  end
+
+  defp close_provider_channels_before_update(profile, chain_id, provider_id) do
+    results =
+      for transport <- [:http, :ws] do
+        TransportRegistry.close_channel_sync(profile, chain_id, provider_id, transport)
+      end
+
+    case Enum.find(results, &match?({:error, _}, &1)) do
+      nil -> :ok
+      error -> error
+    end
+  end
+
+  defp remove_for_update(profile, chain_name, provider_id) do
+    case remove_provider(profile, chain_name, provider_id, persist: false) do
+      {:error, {:runtime_reconcile_pending, _}} -> :ok
+      result -> result
+    end
+  end
+
+  defp replace_removed_provider(profile, chain_name, existing, updated, persist?) do
+    case add_provider(profile, chain_name, updated, persist: persist?) do
+      {:ok, _provider_id} ->
+        :ok
+
+      {:error, _reason} = error ->
+        _ = add_provider(profile, chain_name, existing, persist: false)
         error
     end
   end
@@ -246,9 +311,7 @@ defmodule Lasso.Providers do
         :ok
 
       {:error, _reason} = error ->
-        instance_id = Catalog.lookup_instance_id(profile, chain_id, provider_config.id)
         _ = ConfigStore.unregister_provider_runtime(profile, chain_id, provider_config.id)
-        _ = ChainSupervisor.remove_provider(profile, chain_id, provider_config.id, instance_id)
         error
     end
   end
@@ -270,6 +333,14 @@ defmodule Lasso.Providers do
       auth_headers: attr(attrs, :auth_headers),
       __mock__: attr(attrs, :__mock__)
     }
+  end
+
+  defp normalize_provider_updates(attrs) when is_map(attrs) do
+    attrs
+    |> normalize_provider_config()
+    |> Map.filter(fn {key, _value} ->
+      Map.has_key?(attrs, key) or Map.has_key?(attrs, Atom.to_string(key))
+    end)
   end
 
   defp attr(attrs, key, default \\ nil) do
