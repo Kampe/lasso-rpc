@@ -7,7 +7,7 @@ defmodule Lasso.RPC.ChainState do
 
   ## Usage
 
-      # Get consensus height (uses default 30s freshness)
+      # Get consensus height (uses each observation's freshness policy)
       {:ok, height} = ChainState.consensus_height("ethereum")
 
       # Get provider lag
@@ -19,7 +19,7 @@ defmodule Lasso.RPC.ChainState do
   alias Lasso.BlockSync.Registry, as: BlockSyncRegistry
   alias Lasso.Core.BlockCache
 
-  # Default freshness window for consensus calculation (30 seconds)
+  # Compatibility freshness window for all_provider_heights/2.
   @default_freshness_ms 30_000
 
   @spec consensus_height(pos_integer(), keyword()) ::
@@ -67,7 +67,7 @@ defmodule Lasso.RPC.ChainState do
           {:ok, integer()} | {:error, term()}
   def provider_lag(chain_id, provider_id, opts \\ [])
       when is_integer(chain_id) and chain_id > 0 do
-    freshness_ms = Keyword.get(opts, :freshness_ms, @default_freshness_ms)
+    freshness_ms = Keyword.get(opts, :freshness_ms)
     BlockSyncRegistry.get_provider_lag(chain_id, provider_id, freshness_ms)
   rescue
     e ->
@@ -186,5 +186,5 @@ defmodule Lasso.RPC.ChainState do
   end
 
   defp freshness_or_default({:ok, freshness_ms}), do: freshness_ms
-  defp freshness_or_default(:error), do: @default_freshness_ms
+  defp freshness_or_default(:error), do: nil
 end

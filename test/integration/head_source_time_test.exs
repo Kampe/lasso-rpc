@@ -3,8 +3,36 @@ defmodule Lasso.RPC.HeadSourceTimeTest do
 
   alias Lasso.BlockSync.{Observation, Registry, Worker}
   alias Lasso.Observations.HeadObservation
+  alias Lasso.RPC.ChainState
 
   @moduletag :integration
+
+  test "filtered consensus and provider lag honor a slow poller's freshness policy" do
+    chain_id = System.unique_integer([:positive])
+    instance_id = "slow-poll-#{chain_id}"
+    Registry.clear_chain(chain_id)
+    on_exit(fn -> Registry.clear_chain(chain_id) end)
+
+    observed_at_ms = System.system_time(:millisecond) - 45_000
+
+    :ets.insert(
+      :block_sync_registry,
+      {{:height, chain_id, instance_id}, {500, observed_at_ms, :http, %{stale_after_ms: 90_000}}}
+    )
+
+    assert {:ok, 500} = Registry.get_consensus_height_filtered(chain_id, [instance_id])
+    assert {:ok, 500} = ChainState.consensus_height(chain_id, provider_ids: [instance_id])
+    assert {:ok, 0} = ChainState.provider_lag(chain_id, instance_id)
+
+    assert {:error, :no_data} =
+             ChainState.consensus_height(chain_id,
+               provider_ids: [instance_id],
+               freshness_ms: 30_000
+             )
+
+    assert {:error, :stale_data} =
+             ChainState.provider_lag(chain_id, instance_id, freshness_ms: 30_000)
+  end
 
   test "queued source reports retain their observation time without regressing newer head evidence" do
     chain_id = System.unique_integer([:positive])
