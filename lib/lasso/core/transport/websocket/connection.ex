@@ -391,12 +391,14 @@ defmodule Lasso.RPC.Transport.WebSocket.Connection do
     end
   end
 
+  @default_rate_limit_delay_ms 60_000
+  @min_rate_limit_delay_ms 30_000
   @max_rate_limit_delay_ms 300_000
 
   defp maybe_connect_with_rate_limit_check(state, breaker_id) do
     case InstanceState.read_rate_limit(state.instance_id, :http) do
       %{rate_limited: true, remaining_ms: remaining} ->
-        delay = remaining |> max(30_000) |> min(@max_rate_limit_delay_ms)
+        delay = clamp_rate_limit_delay(remaining)
 
         Logger.info(
           "HTTP rate-limited for #{state.endpoint.id}, delaying WS reconnect by #{delay}ms"
@@ -454,12 +456,7 @@ defmodule Lasso.RPC.Transport.WebSocket.Connection do
           {:connection_error, provider_id, jerr}
         end)
 
-        state =
-          if jerr.retriable? do
-            schedule_reconnect(state)
-          else
-            state
-          end
+        state = schedule_connect_error_recovery(state, jerr)
 
         {:noreply, state}
     end
@@ -1233,10 +1230,12 @@ defmodule Lasso.RPC.Transport.WebSocket.Connection do
         transport: :ws
       )
 
+    idle_timeout = idle_timeout_close?(code, reason, was_stable, had_pending)
+
     # Graceful codes that don't warrant circuit breaker penalty (when connection was stable):
     # 1000 = normal closure, 1001 = going away, 1012 = service restart
     # Note: 1013 (try again later) is NOT graceful - it indicates rate limiting
-    is_graceful = graceful_close_code?(code)
+    is_graceful = graceful_close_code?(code) or idle_timeout
 
     # Determine if this disconnect warrants circuit breaker penalty:
     # 1. Always penalize if connection wasn't stable (dropped before proving reliable)
@@ -1250,7 +1249,8 @@ defmodule Lasso.RPC.Transport.WebSocket.Connection do
           "was_stable=#{was_stable}, had_active_traffic=#{had_pending} (provider: #{state.endpoint.id})"
       )
     else
-      Logger.info("WebSocket closed: code=#{code} (provider: #{state.endpoint.id})")
+      level = if idle_timeout, do: :debug, else: :info
+      Logger.log(level, "WebSocket closed: code=#{code} (provider: #{state.endpoint.id})")
     end
 
     # Clean up any pending requests
@@ -1295,7 +1295,13 @@ defmodule Lasso.RPC.Transport.WebSocket.Connection do
       {:ws_closed, provider_id, code, jerr_with_penalty}
     end)
 
-    state = if jerr.retriable?, do: schedule_reconnect_with_circuit_check(state), else: state
+    state =
+      if idle_timeout do
+        schedule_reconnect(state, :idle_timeout)
+      else
+        schedule_close_recovery(state, code, jerr)
+      end
+
     write_ws_status(state.instance_id, :disconnected, state.reconnect_attempts)
     {:noreply, state}
   end
@@ -1518,6 +1524,25 @@ defmodule Lasso.RPC.Transport.WebSocket.Connection do
     )
 
     # Clear the reconnect timer ref since it's already fired
+    state = %{state | reconnect_ref: nil}
+    {:noreply, state, {:continue, :connect}}
+  end
+
+  def handle_info({:reconnect, :idle_timeout}, %{connected: true} = state) do
+    Logger.debug(
+      "Idle-timeout reconnect skipped for #{state.endpoint.name} " <>
+        "(provider: #{state.endpoint.id}) - already connected"
+    )
+
+    {:noreply, %{state | reconnect_ref: nil}}
+  end
+
+  def handle_info({:reconnect, :idle_timeout}, state) do
+    Logger.debug(
+      "Reconnecting after idle timeout to #{state.endpoint.name} " <>
+        "(attempt #{state.reconnect_attempts}, provider: #{state.endpoint.id})"
+    )
+
     state = %{state | reconnect_ref: nil}
     {:noreply, state, {:continue, :connect}}
   end
@@ -1897,7 +1922,43 @@ defmodule Lasso.RPC.Transport.WebSocket.Connection do
     %{state | reconnect_ref: ref}
   end
 
-  defp schedule_reconnect(state) do
+  defp schedule_connect_error_recovery(state, %JError{retriable?: false}), do: state
+
+  defp schedule_connect_error_recovery(state, %JError{category: :rate_limit} = error) do
+    schedule_reconnect_rate_limited(state, rate_limit_delay(error))
+  end
+
+  defp schedule_connect_error_recovery(state, %JError{retriable?: true}),
+    do: schedule_reconnect(state)
+
+  defp schedule_close_recovery(state, _code, %JError{retriable?: false}), do: state
+
+  defp schedule_close_recovery(state, 1013, %JError{retriable?: true}) do
+    schedule_reconnect_rate_limited(state, @default_rate_limit_delay_ms)
+  end
+
+  defp schedule_close_recovery(state, _code, %JError{retriable?: true}),
+    do: schedule_reconnect_with_circuit_check(state)
+
+  defp rate_limit_delay(%JError{data: data}) when is_map(data) do
+    data
+    |> Map.get(:retry_after_ms, Map.get(data, "retry_after_ms", @default_rate_limit_delay_ms))
+    |> clamp_rate_limit_delay()
+  end
+
+  defp rate_limit_delay(_error), do: @default_rate_limit_delay_ms
+
+  defp clamp_rate_limit_delay(delay) when is_integer(delay) do
+    delay
+    |> max(@min_rate_limit_delay_ms)
+    |> min(@max_rate_limit_delay_ms)
+  end
+
+  defp clamp_rate_limit_delay(_delay), do: @default_rate_limit_delay_ms
+
+  defp schedule_reconnect(state), do: schedule_reconnect(state, :default)
+
+  defp schedule_reconnect(state, reason) do
     state = cancel_pending_reconnect(state)
     max_attempts = state.endpoint.max_reconnect_attempts
 
@@ -1908,25 +1969,30 @@ defmodule Lasso.RPC.Transport.WebSocket.Connection do
       max_label = if max_attempts == :infinity, do: "", else: "/#{max_attempts}"
 
       Logger.log(
-        reconnect_log_level(state.reconnect_attempts),
+        reconnect_log_level(state.reconnect_attempts, reason),
         "Scheduling reconnect for #{state.endpoint.name} (attempt #{state.reconnect_attempts + 1}#{max_label}) in #{total_delay}ms"
       )
 
-      :telemetry.execute(
-        [:lasso, :websocket, :reconnect_scheduled],
-        %{delay_ms: total_delay, jitter_ms: jitter},
+      metadata =
         %{
           provider_id: state.endpoint.id,
           attempt: state.reconnect_attempts + 1,
           max_attempts: max_attempts
         }
+        |> maybe_put_reconnect_reason(reason)
+
+      :telemetry.execute(
+        [:lasso, :websocket, :reconnect_scheduled],
+        %{delay_ms: total_delay, jitter_ms: jitter},
+        metadata
       )
 
       broadcast_conn_event(state, fn provider_id ->
         {:ws_reconnecting, provider_id, state.reconnect_attempts + 1}
       end)
 
-      ref = Process.send_after(self(), {:reconnect}, total_delay)
+      message = if reason == :idle_timeout, do: {:reconnect, :idle_timeout}, else: {:reconnect}
+      ref = Process.send_after(self(), message, total_delay)
 
       new_state = %{
         state
@@ -2584,6 +2650,15 @@ defmodule Lasso.RPC.Transport.WebSocket.Connection do
   defp graceful_close_code?(code) when code in [1000, 1001, 1012], do: true
   defp graceful_close_code?(_code), do: false
 
+  defp idle_timeout_close?(1013, reason, true, false) when is_binary(reason) do
+    reason
+    |> String.trim()
+    |> String.downcase()
+    |> String.contains?("connection timeout exceeded")
+  end
+
+  defp idle_timeout_close?(_code, _reason, _was_stable, _had_pending), do: false
+
   # Generate unique connection ID for tracking connection instances
   # Used to detect stale subscriptions after reconnect
   defp generate_connection_id do
@@ -2610,6 +2685,14 @@ defmodule Lasso.RPC.Transport.WebSocket.Connection do
   defp reconnect_log_level(attempts) do
     if attempts < @reconnect_log_threshold, do: :info, else: :debug
   end
+
+  defp reconnect_log_level(_attempts, :idle_timeout), do: :debug
+  defp reconnect_log_level(attempts, _reason), do: reconnect_log_level(attempts)
+
+  defp maybe_put_reconnect_reason(metadata, :idle_timeout),
+    do: Map.put(metadata, :reason, :idle_timeout)
+
+  defp maybe_put_reconnect_reason(metadata, _reason), do: metadata
 
   @doc false
   @spec via_instance_name(String.t()) :: {:via, Registry, {Lasso.Registry, term()}}
