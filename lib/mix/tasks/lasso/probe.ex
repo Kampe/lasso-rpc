@@ -29,7 +29,7 @@ defmodule Mix.Tasks.Lasso.Probe do
       - table: Human-readable table
       - json: JSON output for programmatic use
 
-    * `--chain <name>` - Chain name for context (default: ethereum)
+    * `--chain <name>` - Legacy label accepted for compatibility; archive depth uses the live head
 
     * `--concurrent <n>` - Max concurrent requests (default: 5)
 
@@ -119,6 +119,7 @@ defmodule Mix.Tasks.Lasso.Probe do
         timeout: timeout,
         chain: chain,
         concurrent: concurrent,
+        user_initiated: true,
         subscription_wait: subscription_wait
       )
 
@@ -186,7 +187,7 @@ defmodule Mix.Tasks.Lasso.Probe do
   defp print_header(url, probes, level, timeout) do
     probes_str = Enum.map_join(probes, ", ", &Atom.to_string/1)
 
-    Mix.shell().info("Probing provider: #{url}")
+    Mix.shell().info("Probing provider: #{Lasso.URLMask.redact(url)}")
     Mix.shell().info("Probes: #{probes_str}")
     Mix.shell().info("Method level: #{level}")
     Mix.shell().info("Timeout: #{timeout}ms")

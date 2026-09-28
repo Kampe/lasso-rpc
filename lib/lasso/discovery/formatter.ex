@@ -62,6 +62,7 @@ defmodule Lasso.Discovery.Formatter do
     sections
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
+    |> Lasso.URLMask.mask_in_string()
   end
 
   @doc """
@@ -71,6 +72,7 @@ defmodule Lasso.Discovery.Formatter do
   def format_json(results) do
     results
     |> prepare_for_json()
+    |> redact_embedded_urls()
     |> Jason.encode!(pretty: true)
   end
 
@@ -91,7 +93,7 @@ defmodule Lasso.Discovery.Formatter do
       divider(),
       "PROVIDER DISCOVERY RESULTS",
       divider(),
-      "URL: #{results[:url] || "N/A"}",
+      "URL: #{if(results[:url], do: Lasso.URLMask.redact(results.url), else: "N/A")}",
       "Probes: #{probes}",
       "Timestamp: #{timestamp} UTC",
       ""
@@ -334,6 +336,9 @@ defmodule Lasso.Discovery.Formatter do
 
   # Summary section
 
+  defp format_summary(%{methods: nil, websocket: nil, limits: %{identity: %{status: :error}}}),
+    do: "Discovery did not establish chain identity; no limit recommendation."
+
   defp format_summary(results) do
     config = Lasso.Discovery.generate_capabilities_config(results)
 
@@ -411,6 +416,7 @@ defmodule Lasso.Discovery.Formatter do
 
   defp prepare_for_json(results) do
     results
+    |> Map.update(:url, nil, &Lasso.URLMask.redact/1)
     |> Map.update(:timestamp, nil, fn
       %DateTime{} = dt -> DateTime.to_iso8601(dt)
       other -> other
@@ -450,4 +456,17 @@ defmodule Lasso.Discovery.Formatter do
   end
 
   defp stringify_map_values(other), do: other
+
+  defp redact_embedded_urls(value) when is_binary(value),
+    do: Lasso.URLMask.mask_in_string(value)
+
+  defp redact_embedded_urls(value) when is_list(value),
+    do: Enum.map(value, &redact_embedded_urls/1)
+
+  defp redact_embedded_urls(%_{} = value), do: value
+
+  defp redact_embedded_urls(value) when is_map(value),
+    do: Map.new(value, fn {key, nested} -> {key, redact_embedded_urls(nested)} end)
+
+  defp redact_embedded_urls(value), do: value
 end
