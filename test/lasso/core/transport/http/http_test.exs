@@ -255,6 +255,81 @@ defmodule Lasso.RPC.Transports.HTTPTest do
              HTTP.request(channel, rpc_request, 1_000)
   end
 
+  test "shared provider rules affect the returned error without changing shared attempt control" do
+    provider_id = "shared-control-#{System.unique_integer([:positive])}"
+    chain_id = 8_453
+    profiles = ["public", "testnet"]
+
+    provider = %{
+      id: provider_id,
+      name: "Shared control provider",
+      url: "http://shared-control.test",
+      priority: 10
+    }
+
+    for profile <- profiles do
+      :ok = Lasso.Testing.ChainHelper.ensure_chain_exists(chain_id, profile: profile)
+      :ok = Lasso.Config.ConfigStore.register_provider_runtime(profile, chain_id, provider)
+    end
+
+    Lasso.Providers.Catalog.build_from_config()
+
+    on_exit(fn ->
+      for profile <- profiles do
+        Lasso.Config.ConfigStore.unregister_provider_runtime(profile, chain_id, provider_id)
+      end
+
+      Lasso.Providers.Catalog.build_from_config()
+    end)
+
+    instance_id = Lasso.Providers.Catalog.lookup_instance_id("public", chain_id, provider_id)
+
+    assert instance_id ==
+             Lasso.Providers.Catalog.lookup_instance_id("testnet", chain_id, provider_id)
+
+    channel = %{
+      provider_id: provider_id,
+      profile: "public",
+      chain_id: chain_id,
+      provider_capabilities: %{
+        error_rules: [
+          %{code: -32_000, message_contains: "vendor opaque denial", category: :rate_limit}
+        ]
+      },
+      config: provider
+    }
+
+    raw =
+      Jason.encode!(%{
+        "jsonrpc" => "2.0",
+        "id" => "classified-error",
+        "error" => %{"code" => -32_000, "message" => "Vendor opaque denial"}
+      })
+
+    expect(Lasso.RPC.HttpClientMock, :request, fn _config, _method, _params, _opts ->
+      {:ok, {:raw, raw}}
+    end)
+
+    request = %{
+      "jsonrpc" => "2.0",
+      "id" => "classified-error",
+      "method" => "eth_call",
+      "params" => []
+    }
+
+    outcome =
+      RequestOwner.execute(
+        %{attempt_identity(provider_id) | chain_id: chain_id},
+        System.monotonic_time(:microsecond) + 1_000_000,
+        fn -> HTTP.request(channel, request, 1_000) end
+      )
+
+    assert {:error, %JError{category: :rate_limit}, _io_ms} = outcome.result
+
+    assert %AttemptTerminal.Response{kind: :application_error, error_category: :ambiguous} =
+             outcome.fact
+  end
+
   test "request ownership projects production HTTP errors into canonical classes" do
     provider_id = "owner-classified-provider"
 

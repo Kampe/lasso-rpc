@@ -272,31 +272,23 @@ defmodule Lasso.RPC.Response.Batch do
   @doc """
   Build a Batch response from individual response items.
 
-  Items are reordered to match the original request_ids order.
-
-  ## Validations
-
-  - Rejects duplicate response IDs (would cause silent data loss)
-  - Rejects if any request_id is missing from responses
+  Items are stably matched to the original request ID sequence. Repeated IDs
+  are preserved as separate responses because JSON-RPC recommends unique IDs
+  but does not make uniqueness a request-validity requirement.
   """
   @spec build([item()], [id()]) :: {:ok, t()} | {:error, term()}
   def build(items, request_ids) when is_list(items) and is_list(request_ids) do
-    response_ids = Enum.map(items, &item_id/1)
-
-    case find_duplicates(response_ids) do
-      [] ->
-        build_batch(items, request_ids)
-
-      duplicates ->
-        {:error, {:duplicate_response_ids, duplicates}}
-    end
+    build_batch(items, request_ids)
   end
 
   defp build_batch(items, request_ids) do
-    items_by_id = Map.new(items, fn item -> {item_id(item), item} end)
+    items_by_id =
+      items
+      |> Enum.group_by(&item_id/1)
+      |> Map.new(fn {id, grouped_items} -> {id, :queue.from_list(grouped_items)} end)
 
     case order_items(items_by_id, request_ids, []) do
-      {:ok, ordered_items} ->
+      {:ok, ordered_items, remaining} when map_size(remaining) == 0 ->
         {:ok,
          %__MODULE__{
            items: ordered_items,
@@ -304,17 +296,29 @@ defmodule Lasso.RPC.Response.Batch do
            total_byte_size: calculate_total_size(ordered_items)
          }}
 
-      {:error, _} = error ->
+      {:ok, _ordered_items, remaining} ->
+        {:error, {:unexpected_response_ids, Map.keys(remaining)}}
+
+      {:error, _reason} = error ->
         error
     end
   end
 
-  defp order_items(_items_by_id, [], acc), do: {:ok, Enum.reverse(acc)}
+  defp order_items(items_by_id, [], acc), do: {:ok, Enum.reverse(acc), items_by_id}
 
   defp order_items(items_by_id, [id | rest], acc) do
     case Map.fetch(items_by_id, id) do
-      {:ok, item} ->
-        order_items(items_by_id, rest, [item | acc])
+      {:ok, queue} ->
+        {{:value, item}, remaining_queue} = :queue.out(queue)
+
+        remaining_items =
+          if :queue.is_empty(remaining_queue) do
+            Map.delete(items_by_id, id)
+          else
+            Map.put(items_by_id, id, remaining_queue)
+          end
+
+        order_items(remaining_items, rest, [item | acc])
 
       :error ->
         {:error, {:missing_response_id, id}}
@@ -323,13 +327,6 @@ defmodule Lasso.RPC.Response.Batch do
 
   defp item_id(%Success{id: id}), do: id
   defp item_id(%Error{id: id}), do: id
-
-  defp find_duplicates(ids) do
-    ids
-    |> Enum.frequencies()
-    |> Enum.filter(fn {_id, count} -> count > 1 end)
-    |> Enum.map(fn {id, _count} -> id end)
-  end
 
   @doc """
   Serialize batch response to JSON bytes.

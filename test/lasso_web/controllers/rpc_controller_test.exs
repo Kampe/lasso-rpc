@@ -290,6 +290,28 @@ defmodule LassoWeb.RPCControllerWireContractTest do
       assert is_binary(result)
     end
 
+    test "a batch returns distinct results for repeated request IDs", %{chain: chain} do
+      setup_providers([%{id: "batch-repeated-id", behavior: :healthy, profile: "public"}])
+
+      batch = [
+        %{"jsonrpc" => "2.0", "method" => "eth_chainId", "params" => [], "id" => "same"},
+        %{"jsonrpc" => "2.0", "method" => "eth_blockNumber", "params" => [], "id" => "same"}
+      ]
+
+      conn = post_json("/rpc/#{chain}", batch)
+
+      assert conn.status == 200
+
+      assert [
+               %{"id" => "same", "result" => chain_result},
+               %{"id" => "same", "result" => block_result}
+             ] =
+               json_response(conn, 200)
+
+      assert chain_result == "0x" <> (chain |> Integer.to_string(16) |> String.downcase())
+      assert is_binary(block_result)
+    end
+
     test "invalid batch members receive null-ID errors", %{chain: chain} do
       setup_providers([%{id: "batch-local", behavior: :healthy, profile: "public"}])
       conn = post_json("/rpc/#{chain}", [%{}, 42])
