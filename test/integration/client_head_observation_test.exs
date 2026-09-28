@@ -3,7 +3,8 @@ defmodule Lasso.RPC.ClientHeadObservationTest do
 
   alias Lasso.BlockSync.Registry, as: BlockSyncRegistry
   alias Lasso.BlockSync.Strategies.HttpStrategy
-  alias Lasso.Providers.Catalog
+  alias Lasso.JSONRPC.Error, as: JError
+  alias Lasso.Providers.{Catalog, InstanceState}
   alias Lasso.RPC.Response.Success
 
   test "a real client head response publishes attributed evidence without changing the response",
@@ -108,6 +109,55 @@ defmodule Lasso.RPC.ClientHeadObservationTest do
 
     assert_receive :polled
     HttpStrategy.stop(active)
+  end
+
+  test "a throttled head poll preserves transport health and waits through its cooldown", %{
+    chain: chain
+  } do
+    setup_providers([
+      %{id: "poll-throttle", priority: 1, behavior: :healthy, background_observations: false}
+    ])
+
+    instance_id = Catalog.lookup_instance_id("public", chain, "poll-throttle")
+
+    error =
+      JError.new(-32_005, "Too many requests",
+        category: :rate_limit,
+        data: %{retry_after_ms: 5_000}
+      )
+
+    {:ok, state} =
+      HttpStrategy.start(chain, instance_id,
+        parent: self(),
+        initial_delay_ms: 0,
+        poll_interval_ms: 10_000,
+        route_resolver: fn _, _ -> {:ok, "public", "poll-throttle"} end,
+        poll_runner: fn _ -> {:error, error} end
+      )
+
+    state = %{state | consecutive_failures: 2}
+    assert_receive {:http_strategy, :poll, ^instance_id, generation}
+    assert {:ok, state} = HttpStrategy.handle_message({:poll, generation}, state)
+
+    assert_receive {:http_strategy, :poll_result, ^instance_id, owner_id, owner_pid,
+                    %{result: {:error, ^error}} = outcome}
+
+    assert {:ok, state} =
+             HttpStrategy.handle_message({:poll_result, owner_id, owner_pid, outcome}, state)
+
+    assert state.consecutive_failures == 0
+
+    assert [{{:health_block_sync, ^instance_id}, %{http_status: :healthy}}] =
+             :ets.lookup(:lasso_instance_state, {:health_block_sync, instance_id})
+
+    assert InstanceState.read_rate_limit(instance_id, :http).remaining_ms > 19_000
+    assert Process.read_timer(state.timer_ref) > 19_000
+
+    Process.cancel_timer(state.timer_ref)
+    assert {:ok, deferred} = HttpStrategy.handle_message({:poll, state.poll_generation}, state)
+    assert deferred.poll_owner_pid == nil
+    assert Process.read_timer(deferred.timer_ref) > 19_000
+    HttpStrategy.stop(deferred)
   end
 
   test "malformed and oversized client head responses do not publish evidence", %{chain: chain} do

@@ -25,9 +25,11 @@ defmodule Lasso.BlockSync.Strategies.HttpStrategy do
   alias Lasso.BlockSync.{Observation, Registry}
   alias Lasso.Config.ConfigStore
   alias Lasso.Core.Request.ExecutionScope
-  alias Lasso.Core.Support.CircuitBreaker
+  alias Lasso.Core.Support.{CircuitBreaker, ErrorClassification}
+  alias Lasso.JSONRPC.Error, as: JError
+  alias Lasso.JSONRPC.Quantity
   alias Lasso.Observations.{HeadObservation, HeadReference, HeadSnapshot}
-  alias Lasso.Providers.{Catalog, HeadEvidence}
+  alias Lasso.Providers.{Catalog, HeadEvidence, InstanceState}
   alias Lasso.RPC.{RequestOptions, RequestPipeline, Response}
 
   @default_poll_interval_ms 15_000
@@ -36,6 +38,7 @@ defmodule Lasso.BlockSync.Strategies.HttpStrategy do
   @max_consecutive_failures 3
   @degraded_threshold 2
   @unhealthy_threshold 5
+  @quota_exhaustion_poll_delay_ms :timer.hours(1)
 
   defmodule PollPlan do
     @moduledoc false
@@ -193,7 +196,8 @@ defmodule Lasso.BlockSync.Strategies.HttpStrategy do
         %__MODULE__{poll_generation: generation, poll_owner_pid: nil} = state
       ) do
     state = %{state | timer_ref: nil, poll_generation: nil}
-    delay_ms = client_observation_delay_ms(state, System.system_time(:millisecond))
+    cooldown = InstanceState.read_rate_limit(state.instance_id, :http).remaining_ms || 0
+    delay_ms = max(cooldown, client_observation_delay_ms(state, System.system_time(:millisecond)))
 
     if delay_ms > 0 do
       {:ok, schedule_poll(state, delay_ms)}
@@ -205,7 +209,7 @@ defmodule Lasso.BlockSync.Strategies.HttpStrategy do
   def handle_message({:poll, _stale_generation}, %__MODULE__{} = state), do: {:ok, state}
 
   def handle_message(
-        {:poll_result, owner_id, owner_pid, result},
+        {:poll_result, owner_id, owner_pid, result_or_outcome},
         %__MODULE__{
           poll_owner_id: owner_id,
           poll_owner_pid: owner_pid,
@@ -214,12 +218,14 @@ defmodule Lasso.BlockSync.Strategies.HttpStrategy do
         } = state
       ) do
     Process.demonitor(owner_ref, [:flush])
+    outcome = normalize_poll_outcome(result_or_outcome)
+    next_delay_ms = next_poll_delay_ms(outcome.result, state.poll_interval_ms)
 
     state =
       state
       |> clear_poll_owner()
-      |> apply_poll_result(result, plan)
-      |> schedule_poll(state.poll_interval_ms)
+      |> apply_poll_result(outcome, plan)
+      |> schedule_poll(next_delay_ms)
 
     {:ok, state}
   end
@@ -461,25 +467,9 @@ defmodule Lasso.BlockSync.Strategies.HttpStrategy do
         new_state
 
       {:error, reason} ->
-        failures = state.consecutive_failures + 1
-        write_health_failure(state.instance_id, failures, reason)
-
-        if failures == @max_consecutive_failures do
-          Logger.warning("HTTP polling degraded",
-            chain_id: state.chain_id,
-            instance_id: state.instance_id,
-            consecutive_failures: failures,
-            error: inspect(reason)
-          )
-
-          send(state.parent, {:status, state.instance_id, :http, :degraded})
-        end
-
-        %{
-          state
-          | consecutive_failures: failures,
-            last_poll_time: outcome.observed_at_ms
-        }
+        state
+        |> apply_poll_error(reason)
+        |> Map.put(:last_poll_time, outcome.observed_at_ms)
     end
   end
 
@@ -492,6 +482,73 @@ defmodule Lasso.BlockSync.Strategies.HttpStrategy do
       observed_at_ms: System.system_time(:millisecond)
     }
   end
+
+  defp apply_poll_error(state, %JError{category: category} = reason) do
+    if ErrorClassification.provider_health_failure?(category) do
+      apply_health_failure(state, reason)
+    else
+      if category == :rate_limit do
+        InstanceState.record_rate_limit(
+          state.instance_id,
+          :http,
+          rate_limit_ttl_ms(reason, state.poll_interval_ms)
+        )
+      end
+
+      write_health_success(state.instance_id)
+      maybe_signal_recovery(state)
+      %{state | consecutive_failures: 0}
+    end
+  end
+
+  defp apply_poll_error(state, reason), do: apply_health_failure(state, reason)
+
+  defp apply_health_failure(state, reason) do
+    failures = state.consecutive_failures + 1
+    write_health_failure(state.instance_id, failures, reason)
+
+    if failures == @max_consecutive_failures do
+      Logger.warning("HTTP polling degraded",
+        chain_id: state.chain_id,
+        instance_id: state.instance_id,
+        consecutive_failures: failures,
+        error: inspect(reason)
+      )
+
+      send(state.parent, {:status, state.instance_id, :http, :degraded})
+    end
+
+    %{state | consecutive_failures: failures}
+  end
+
+  defp maybe_signal_recovery(%{consecutive_failures: failures} = state)
+       when failures >= @max_consecutive_failures do
+    send(state.parent, {:status, state.instance_id, :http, :healthy})
+  end
+
+  defp maybe_signal_recovery(_state), do: :ok
+
+  defp rate_limit_ttl_ms(%JError{data: data} = error, poll_interval_ms) do
+    retry_after_ms =
+      if is_map(data),
+        do: Map.get(data, :retry_after_ms) || Map.get(data, "retry_after_ms"),
+        else: nil
+
+    floor_ms =
+      if ErrorClassification.quota_exhausted?(error.message),
+        do: @quota_exhaustion_poll_delay_ms,
+        else: poll_interval_ms * 2
+
+    max(valid_retry_after_ms(retry_after_ms), floor_ms)
+  end
+
+  defp next_poll_delay_ms({:error, %JError{category: :rate_limit} = error}, poll_interval_ms),
+    do: rate_limit_ttl_ms(error, poll_interval_ms)
+
+  defp next_poll_delay_ms(_result, poll_interval_ms), do: poll_interval_ms
+
+  defp valid_retry_after_ms(value) when is_integer(value) and value > 0, do: value
+  defp valid_retry_after_ms(_value), do: 30_000
 
   defp write_health_success(instance_id) do
     :ets.insert(
@@ -547,11 +604,19 @@ defmodule Lasso.BlockSync.Strategies.HttpStrategy do
 
   @doc false
   @spec decode_poll_response(term()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def decode_poll_response(%Response.Success{} = response) do
+    Response.Success.consume_capacity(response, :block_sync_consumed, &decode_poll_result/1)
+  end
+
   def decode_poll_response(response) do
+    decode_poll_result(response)
+  end
+
+  defp decode_poll_result(response) do
     with {:ok, result} <- decode_result(response) do
-      case result do
-        "0x" <> hex -> {:ok, String.to_integer(hex, 16)}
-        other -> {:error, {:unexpected_result, other}}
+      case Quantity.decode(result) do
+        {:ok, height} -> {:ok, height}
+        {:error, :invalid_quantity} -> {:error, {:unexpected_result, result}}
       end
     end
   end
