@@ -1284,9 +1284,10 @@ defmodule Lasso.RPC.RequestPipeline do
   end
 
   defp block_sync_log_level(ctx, default \\ :info) do
-    if is_binary(ctx.request_id) and String.starts_with?(ctx.request_id, "block-sync:"),
-      do: :debug,
-      else: default
+    case ctx.request_id do
+      "block-sync:" <> _ -> :debug
+      _ -> default
+    end
   end
 
   @spec finalize_error(JError.t(), RequestContext.t()) :: result()

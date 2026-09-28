@@ -209,11 +209,11 @@ defmodule Lasso.Discovery.Probes.WebSocket do
     end
 
     # Phase 4: Classify with correlation
-    new_heads_verified = MapSet.member?(events_received, "newHeads")
+    new_heads_verified = Map.has_key?(events_received, "newHeads")
 
     successful_results =
       Enum.map(active_subs, fn {sub_type, {:ok, sub_id}} ->
-        received = MapSet.member?(events_received, sub_type)
+        received = Map.has_key?(events_received, sub_type)
         status = classify_subscription(sub_type, received, new_heads_verified)
 
         {sub_type, %{status: status, subscription_id: sub_id, received_event: received}}
@@ -236,13 +236,13 @@ defmodule Lasso.Discovery.Probes.WebSocket do
 
   defp collect_events(sub_id_to_type, wait_ms, monitor_ref) do
     deadline = System.monotonic_time(:millisecond) + wait_ms
-    do_collect_events(sub_id_to_type, deadline, MapSet.new(), monitor_ref)
+    do_collect_events(sub_id_to_type, deadline, %{}, monitor_ref)
   end
 
   defp do_collect_events(sub_id_to_type, deadline, received, monitor_ref) do
     remaining = deadline - System.monotonic_time(:millisecond)
 
-    if remaining <= 0 or MapSet.size(received) == map_size(sub_id_to_type) do
+    if remaining <= 0 or map_size(received) == map_size(sub_id_to_type) do
       {received, false}
     else
       receive do
@@ -259,7 +259,7 @@ defmodule Lasso.Discovery.Probes.WebSocket do
                 sub_id_to_type,
                 deadline,
                 if(valid_event?(sub_type, event),
-                  do: MapSet.put(received, sub_type),
+                  do: Map.put(received, sub_type, true),
                   else: received
                 ),
                 monitor_ref
