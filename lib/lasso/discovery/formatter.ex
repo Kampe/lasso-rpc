@@ -14,6 +14,7 @@ defmodule Lasso.Discovery.Formatter do
   # Status icons for terminal output
   @status_icons %{
     supported: "~G",
+    accepted: "~Y",
     recognized: "~Y",
     unverifiable: "~Y",
     unsupported: "~R",

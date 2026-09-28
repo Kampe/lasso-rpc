@@ -146,7 +146,9 @@ defmodule Lasso.Discovery do
 
     WebSocket.probe(url,
       timeout: timeout,
-      subscription_wait: subscription_wait
+      subscription_wait: subscription_wait,
+      chain_id: Keyword.get(opts, :chain_id),
+      provider_capabilities: Keyword.get(opts, :provider_capabilities, %{})
     )
   end
 
@@ -224,7 +226,12 @@ defmodule Lasso.Discovery do
     timeout = Keyword.get(opts, :timeout, 10_000)
     subscription_wait = Keyword.get(opts, :subscription_wait, 15_000)
 
-    WebSocket.probe(url, timeout: timeout, subscription_wait: subscription_wait)
+    WebSocket.probe(url,
+      timeout: timeout,
+      subscription_wait: subscription_wait,
+      chain_id: Keyword.get(opts, :chain_id),
+      provider_capabilities: Keyword.get(opts, :provider_capabilities, %{})
+    )
   end
 
   # URL conversion helpers

@@ -57,6 +57,11 @@ defmodule Lasso.Discovery.Probes.Limits do
   """
   @spec probe(String.t(), keyword()) :: %{test_name() => test_result()}
   def probe(url, opts \\ []) do
+    context = %{
+      on_throttle: Keyword.get(opts, :on_throttle),
+      capabilities: Keyword.get(opts, :provider_capabilities, %{})
+    }
+
     default_tests =
       if Keyword.get(opts, :user_initiated, false),
         do: @available_tests -- [:rate_limit],
@@ -70,7 +75,7 @@ defmodule Lasso.Discovery.Probes.Limits do
     current_block = get_current_block(url, timeout)
 
     Enum.reduce(tests, %{}, fn test, acc ->
-      result = run_test(test, url, chain, current_block, timeout)
+      result = run_test(test, url, chain, current_block, timeout, context)
       Map.put(acc, test, result)
     end)
   end
@@ -83,51 +88,56 @@ defmodule Lasso.Discovery.Probes.Limits do
 
   # Individual test implementations
 
-  defp run_test(:block_range, url, _chain, current_block, timeout) do
+  defp run_test(:block_range, url, _chain, current_block, timeout, context) do
     if current_block do
-      test_block_range(url, current_block, timeout)
+      test_block_range(url, current_block, timeout, context)
     else
       %{status: :inconclusive, value: nil, recommendation: "Could not get current block"}
     end
   end
 
-  defp run_test(:address_count, url, _chain, _current_block, timeout) do
+  defp run_test(:address_count, url, _chain, _current_block, timeout, _context) do
     test_address_count(url, timeout)
   end
 
-  defp run_test(:batch_requests, url, _chain, _current_block, timeout) do
+  defp run_test(:batch_requests, url, _chain, _current_block, timeout, _context) do
     test_batch_requests(url, timeout)
   end
 
-  defp run_test(:block_params, url, _chain, _current_block, timeout) do
+  defp run_test(:block_params, url, _chain, _current_block, timeout, _context) do
     test_block_params(url, timeout)
   end
 
-  defp run_test(:archive_support, url, _chain, current_block, timeout) do
-    test_archive_support(url, current_block, timeout)
+  defp run_test(:archive_support, url, _chain, current_block, timeout, context) do
+    test_archive_support(url, current_block, timeout, context)
   end
 
-  defp run_test(:rate_limit, url, _chain, _current_block, timeout) do
+  defp run_test(:rate_limit, url, _chain, _current_block, timeout, _context) do
     test_rate_limit(url, timeout)
   end
 
   # A range limit is reported only after a narrower tier succeeds and a wider
   # tier receives a recognized range rejection. Empty or failed probes prove
   # neither an unlimited range nor a specific ceiling.
-  defp test_block_range(url, current_block, timeout) do
+  defp test_block_range(url, current_block, timeout, context) do
     @block_range_tiers
     |> Enum.filter(&(&1 <= current_block - 1))
     |> Enum.reduce_while({:none, nil}, fn tier, {_outcome, last_success} ->
-      case probe_block_range_tier(url, current_block, tier, timeout) do
-        :ok -> {:cont, {:ok, tier}}
-        {:rejected, error} -> {:halt, {range_failure(error), last_success}}
-        :transient -> {:halt, {:inconclusive, last_success}}
+      case probe_block_range_tier(url, current_block, tier, timeout, context.on_throttle) do
+        :ok ->
+          {:cont, {:ok, tier}}
+
+        {:rejected, error} ->
+          {:halt, {range_failure(error, context.capabilities), last_success}}
+
+        :transient ->
+          {:halt, {:inconclusive, last_success}}
       end
     end)
     |> block_range_result()
   end
 
-  defp probe_block_range_tier(url, current_block, tier, timeout) do
+  defp probe_block_range_tier(url, current_block, tier, timeout, on_throttle) do
     to_block = max(current_block - 1, 0)
     from_block = max(to_block - tier, 0)
 
@@ -148,13 +158,17 @@ defmodule Lasso.Discovery.Probes.Limits do
       {:ok, %{"error" => error}} ->
         {:rejected, error}
 
+      {:rate_limited, _} ->
+        maybe_signal_throttle(on_throttle)
+        :transient
+
       _ ->
         :transient
     end
   end
 
-  defp range_failure(error) do
-    case ErrorClassifier.classify(error) do
+  defp range_failure(error, capabilities) do
+    case ErrorClassifier.classify(error, capabilities) do
       {:block_range, _} -> :too_wide
       _ -> :inconclusive
     end
@@ -348,7 +362,7 @@ defmodule Lasso.Discovery.Probes.Limits do
     }
   end
 
-  defp test_archive_support(_url, nil, _timeout) do
+  defp test_archive_support(_url, nil, _timeout, _context) do
     %{
       status: :inconclusive,
       value: nil,
@@ -356,7 +370,7 @@ defmodule Lasso.Discovery.Probes.Limits do
     }
   end
 
-  defp test_archive_support(_url, current_block, _timeout)
+  defp test_archive_support(_url, current_block, _timeout, _context)
        when current_block <= @min_archive_depth do
     %{
       status: :inconclusive,
@@ -365,12 +379,12 @@ defmodule Lasso.Discovery.Probes.Limits do
     }
   end
 
-  defp test_archive_support(url, current_block, timeout) do
+  defp test_archive_support(url, current_block, timeout, context) do
     midpoint = div(current_block, 2)
     floor_block = max(current_block - @min_archive_depth, 1)
     deep_block = midpoint |> min(floor_block) |> max(1)
 
-    case probe_state_retention(url, deep_block, timeout) do
+    case probe_state_retention(url, deep_block, timeout, context.capabilities) do
       :unknown ->
         %{
           status: :inconclusive,
@@ -379,11 +393,15 @@ defmodule Lasso.Discovery.Probes.Limits do
         }
 
       state ->
-        classify_archive(state, probe_log_retention(url, deep_block, timeout), deep_block)
+        classify_archive(
+          state,
+          probe_log_retention(url, deep_block, timeout, context.capabilities),
+          deep_block
+        )
     end
   end
 
-  defp probe_state_retention(url, deep_block, timeout) do
+  defp probe_state_retention(url, deep_block, timeout, capabilities) do
     if state_readable?(url, "latest", timeout) do
       deep = TestParams.int_to_hex(deep_block)
 
@@ -392,7 +410,7 @@ defmodule Lasso.Discovery.Probes.Limits do
           if MethodEvidence.quantity?(value), do: :retained, else: :unknown
 
         {:ok, %{"error" => error}} ->
-          depth_failure(error)
+          depth_failure(error, capabilities)
 
         _ ->
           :unknown
@@ -409,7 +427,7 @@ defmodule Lasso.Discovery.Probes.Limits do
     end
   end
 
-  defp probe_log_retention(url, deep_block, timeout) do
+  defp probe_log_retention(url, deep_block, timeout, capabilities) do
     params = [
       %{
         "fromBlock" => TestParams.int_to_hex(deep_block),
@@ -425,15 +443,15 @@ defmodule Lasso.Discovery.Probes.Limits do
           else: :unknown
 
       {:ok, %{"error" => error}} ->
-        depth_failure(error)
+        depth_failure(error, capabilities)
 
       _ ->
         :unknown
     end
   end
 
-  defp depth_failure(error) do
-    case ErrorClassifier.classify(error) do
+  defp depth_failure(error, capabilities) do
+    case ErrorClassifier.classify(error, capabilities) do
       {:state_unavailable, _} -> :pruned
       _ -> :unknown
     end
@@ -584,4 +602,10 @@ defmodule Lasso.Discovery.Probes.Limits do
       _ -> body
     end
   end
+
+  defp maybe_signal_throttle(on_throttle) when is_function(on_throttle, 1) do
+    on_throttle.(%{retry_after_ms: nil, phase: :limits})
+  end
+
+  defp maybe_signal_throttle(_), do: :ok
 end
