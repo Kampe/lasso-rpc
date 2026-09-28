@@ -12,9 +12,17 @@ defmodule Lasso.RPC.AttemptEvidenceIntegrationTest do
   defmodule DummyWebSocketConnection do
     use GenServer
 
-    def start_link(name), do: GenServer.start_link(__MODULE__, nil, name: name)
+    def start_link(instance_id) do
+      GenServer.start_link(__MODULE__, instance_id,
+        name: Lasso.RPC.Transport.WebSocket.Connection.via_instance_name(instance_id)
+      )
+    end
+
     @impl true
-    def init(nil), do: {:ok, nil}
+    def init(instance_id) do
+      :ets.insert(:lasso_instance_state, {{:ws_status, instance_id}, %{status: :connected}})
+      {:ok, instance_id}
+    end
   end
 
   setup do
@@ -141,10 +149,7 @@ defmodule Lasso.RPC.AttemptEvidenceIntegrationTest do
     assert is_binary(expected)
     assert {:ok, snapshot_config} = Lasso.Providers.Catalog.get_instance(snapshot, expected)
 
-    {:ok, ws_pid} =
-      DummyWebSocketConnection.start_link(
-        Lasso.RPC.Transport.WebSocket.Connection.via_instance_name(expected)
-      )
+    {:ok, ws_pid} = DummyWebSocketConnection.start_link(expected)
 
     on_exit(fn ->
       Lasso.RPC.TransportRegistry.close_channel_sync(
@@ -162,6 +167,7 @@ defmodule Lasso.RPC.AttemptEvidenceIntegrationTest do
       )
 
       if Process.alive?(ws_pid), do: GenServer.stop(ws_pid)
+      :ets.delete(:lasso_instance_state, {:ws_status, expected})
 
       Lasso.Config.ConfigStore.unregister_provider_runtime("public", chain, provider_id)
       Lasso.Providers.Catalog.build_from_config()
