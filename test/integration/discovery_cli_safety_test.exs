@@ -40,6 +40,17 @@ defmodule Lasso.Integration.DiscoveryCliSafetyTest do
             {:range_error, "eth_getLogs"} ->
               error(request, -32_601, "Method not found")
 
+            {:range_policy_override, "eth_getLogs"} ->
+              case request["params"] do
+                [%{"fromBlock" => from, "toBlock" => to}] ->
+                  {:ok, first} = Lasso.JSONRPC.Quantity.decode(from)
+                  {:ok, last} = Lasso.JSONRPC.Quantity.decode(to)
+
+                  if last - first > 10,
+                    do: error(request, 23, "block range too wide"),
+                    else: success(request, [])
+              end
+
             {_, "eth_chainId"} ->
               success(request, "0x89")
 
@@ -59,7 +70,11 @@ defmodule Lasso.Integration.DiscoveryCliSafetyTest do
               error(request, -32_601, "Method not found")
           end
 
-        send_resp(conn, 200, Jason.encode!(response))
+        if opts[:mode] == :http_throttle and method == "eth_getLogs" do
+          send_resp(conn, 429, "Too many requests")
+        else
+          send_resp(conn, 200, Jason.encode!(response))
+        end
       end
     end
 
@@ -146,6 +161,34 @@ defmodule Lasso.Integration.DiscoveryCliSafetyTest do
              Limits.probe(url, tests: [:batch_requests], timeout: 1_000)
 
     assert_receive {:discovery_batch, 10}
+  end
+
+  test "range evidence respects provider error policy and reports HTTP throttling" do
+    url = start_upstream(:range_policy_override)
+
+    assert %{block_range: %{status: :limited, value: 10}} =
+             Limits.probe(url, tests: [:block_range], timeout: 1_000)
+
+    capabilities = %{error_rules: [%{code: 23, category: :rate_limit}]}
+
+    assert %{block_range: %{status: :inconclusive}} =
+             Limits.probe(url,
+               tests: [:block_range],
+               timeout: 1_000,
+               provider_capabilities: capabilities
+             )
+
+    throttled_url = start_upstream(:http_throttle)
+    caller = self()
+
+    assert %{block_range: %{status: :inconclusive}} =
+             Limits.probe(throttled_url,
+               tests: [:block_range],
+               timeout: 1_000,
+               on_throttle: fn info -> send(caller, {:throttled, info}) end
+             )
+
+    assert_receive {:throttled, %{phase: :limits}}
   end
 
   defp start_upstream(mode) do

@@ -49,6 +49,7 @@ defmodule Lasso.RPC.RequestPipeline do
 
   alias Lasso.RPC.Providers.AdapterFilter
   alias Lasso.RPC.RequestOptions
+  alias Lasso.RPC.Response.Success
   alias Lasso.RPC.RoutingEvidence.Workload
   alias Lasso.RPC.Selection.Exploration
 
@@ -968,7 +969,7 @@ defmodule Lasso.RPC.RequestPipeline do
   defp handle_owner_outcome(
          %{
            fact: %AttemptTerminal.Response{kind: :success} = fact,
-           result: {:ok, _result, _io_ms}
+           result: {:ok, result, _io_ms}
          },
          channel,
          rest_channels,
@@ -978,6 +979,7 @@ defmodule Lasso.RPC.RequestPipeline do
        ) do
     case decision do
       {:error, error} ->
+        Success.release_capacity(result, :head_policy_rejected)
         finalize_error(error, ctx)
 
       {:ok, result} ->
@@ -986,13 +988,17 @@ defmodule Lasso.RPC.RequestPipeline do
             handle_success(result, fact_latency_ms(fact), channel, ctx)
 
           {:error, :caller_abandoned} ->
+            Success.release_capacity(result, :caller_abandoned)
             finalize_caller_abandoned(ctx)
 
           {:error, :deadline_exhausted} ->
+            Success.release_capacity(result, :deadline_exhausted)
             finalize_bounded_error(ctx, :deadline_exhausted)
         end
 
       {:retry, error} ->
+        Success.release_capacity(result, :head_policy_rejected)
+
         ctx =
           ctx
           |> RequestContext.add_upstream_latency(fact_latency_ms(fact))
@@ -1205,7 +1211,7 @@ defmodule Lasso.RPC.RequestPipeline do
           ExecutionScope.CallerGuard.t() | nil
         ) :: result()
   defp handle_circuit_open(channel, rest_channels, ctx, caller_guard) do
-    Logger.info("Circuit breaker open, skipping",
+    Logger.log(block_sync_log_level(ctx), "Circuit breaker open, skipping",
       channel: Channel.to_string(channel),
       request_id: ctx.request_id
     )
@@ -1267,7 +1273,7 @@ defmodule Lasso.RPC.RequestPipeline do
         data: data
       )
 
-    Logger.warning("No channels available",
+    Logger.log(block_sync_log_level(ctx, :warning), "No channels available",
       chain_id: ctx.chain_id,
       method: ctx.method,
       reason: reason,
@@ -1275,6 +1281,13 @@ defmodule Lasso.RPC.RequestPipeline do
     )
 
     finalize_error(jerr, %{ctx | terminal_reason: :providers_exhausted})
+  end
+
+  defp block_sync_log_level(ctx, default \\ :info) do
+    case ctx.request_id do
+      "block-sync:" <> _ -> :debug
+      _ -> default
+    end
   end
 
   @spec finalize_error(JError.t(), RequestContext.t()) :: result()
