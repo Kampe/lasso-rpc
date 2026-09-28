@@ -15,6 +15,9 @@ defmodule Lasso.RPC.Providers.Capabilities do
   alias Lasso.RPC.Providers.AdapterHelpers
 
   @default_unsupported_categories [:local_only]
+  @max_error_rules 32
+  @max_message_patterns_per_rule 8
+  @max_message_pattern_bytes 256
 
   @valid_error_categories [
     :rate_limit,
@@ -94,7 +97,7 @@ defmodule Lasso.RPC.Providers.Capabilities do
 
   def validate_params(method, params, capabilities, ctx) when is_map(capabilities) do
     limits = Map.get(capabilities, :limits, %{})
-    validate_limits(method, params, limits, ctx)
+    validate_limits(method, validation_params(params), limits, ctx)
   end
 
   @doc """
@@ -108,7 +111,14 @@ defmodule Lasso.RPC.Providers.Capabilities do
 
   def classify_error(code, message, capabilities) when is_map(capabilities) do
     rules = Map.get(capabilities, :error_rules, [])
-    evaluate_error_rules(code, message, rules, 0)
+
+    if is_list(rules) do
+      rules
+      |> Enum.take(@max_error_rules)
+      |> evaluate_error_rules(code, message, 0)
+    else
+      :default
+    end
   end
 
   @doc """
@@ -132,6 +142,9 @@ defmodule Lasso.RPC.Providers.Capabilities do
     end
   end
 
+  defp validation_params(params) when is_map(params), do: [params]
+  defp validation_params(params), do: params
+
   defp maybe_validate_block_range("eth_getLogs", params, %{max_block_range: limit}, ctx)
        when is_integer(limit) do
     AdapterHelpers.validate_block_range(params, ctx, limit)
@@ -150,9 +163,9 @@ defmodule Lasso.RPC.Providers.Capabilities do
     end
   end
 
-  defp evaluate_error_rules(_code, _message, [], _index), do: :default
+  defp evaluate_error_rules([], _code, _message, _index), do: :default
 
-  defp evaluate_error_rules(code, message, [rule | rest], index) do
+  defp evaluate_error_rules([rule | rest], code, message, index) do
     if rule_matches?(code, message, rule) do
       :telemetry.execute(
         [:lasso, :capabilities, :error_rule_match],
@@ -162,11 +175,11 @@ defmodule Lasso.RPC.Providers.Capabilities do
 
       {:ok, rule.category}
     else
-      evaluate_error_rules(code, message, rest, index + 1)
+      evaluate_error_rules(rest, code, message, index + 1)
     end
   end
 
-  defp rule_matches?(code, message, rule) do
+  defp rule_matches?(code, message, rule) when is_map(rule) do
     code_match = rule_code_matches?(code, rule)
     message_match = rule_message_matches?(message, rule)
 
@@ -181,6 +194,8 @@ defmodule Lasso.RPC.Providers.Capabilities do
     end
   end
 
+  defp rule_matches?(_code, _message, _rule), do: false
+
   defp rule_code_matches?(code, %{code: rule_code}), do: code == rule_code
   defp rule_code_matches?(_code, _rule), do: false
 
@@ -188,14 +203,26 @@ defmodule Lasso.RPC.Providers.Capabilities do
 
   defp rule_message_matches?(message, %{message_contains: patterns}) when is_list(patterns) do
     lower = String.downcase(message)
-    Enum.any?(patterns, &String.contains?(lower, String.downcase(&1)))
+
+    patterns
+    |> Enum.take(@max_message_patterns_per_rule)
+    |> Enum.any?(&valid_pattern_match?(lower, &1))
   end
 
   defp rule_message_matches?(message, %{message_contains: pattern}) when is_binary(pattern) do
-    String.contains?(String.downcase(message), String.downcase(pattern))
+    valid_pattern_match?(String.downcase(message), pattern)
   end
 
   defp rule_message_matches?(_message, _rule), do: false
+
+  defp valid_pattern_match?(message_lower, pattern) when is_binary(pattern) do
+    pattern = String.trim(pattern)
+
+    byte_size(pattern) > 0 and byte_size(pattern) <= @max_message_pattern_bytes and
+      String.contains?(message_lower, String.downcase(pattern))
+  end
+
+  defp valid_pattern_match?(_message_lower, _pattern), do: false
 
   # --- Boot-time schema validation ---
 
@@ -217,7 +244,19 @@ defmodule Lasso.RPC.Providers.Capabilities do
   defp validate_error_rules!(provider_id, capabilities) do
     rules = Map.get(capabilities, :error_rules, [])
 
+    unless is_list(rules) do
+      raise "Provider #{inspect(provider_id)}: error_rules must be a list."
+    end
+
+    if length(rules) > @max_error_rules do
+      raise "Provider #{inspect(provider_id)}: error_rules exceeds the maximum of #{@max_error_rules}."
+    end
+
     Enum.with_index(rules, fn rule, idx ->
+      unless is_map(rule) do
+        raise "Provider #{inspect(provider_id)}: error_rules[#{idx}] must be a map."
+      end
+
       unless Map.has_key?(rule, :code) or Map.has_key?(rule, :message_contains) do
         raise """
         Provider "#{provider_id}": error_rules[#{idx}] must have at least one of \
@@ -239,31 +278,71 @@ defmodule Lasso.RPC.Providers.Capabilities do
         """
       end
 
+      validate_error_code_type!(provider_id, idx, rule)
       validate_message_contains_type!(provider_id, idx, rule)
     end)
   end
 
+  defp validate_error_code_type!(provider_id, idx, rule) do
+    case Map.fetch(rule, :code) do
+      :error ->
+        :ok
+
+      {:ok, code} when is_integer(code) ->
+        :ok
+
+      {:ok, code} ->
+        raise """
+        Provider "#{provider_id}": error_rules[#{idx}].code must be an integer, \
+        got: #{inspect(code)}
+        """
+    end
+  end
+
   defp validate_message_contains_type!(provider_id, idx, rule) do
-    case Map.get(rule, :message_contains) do
-      nil ->
+    case Map.fetch(rule, :message_contains) do
+      :error ->
         :ok
 
-      val when is_binary(val) ->
-        :ok
+      {:ok, val} when is_binary(val) ->
+        validate_message_pattern!(provider_id, idx, val)
 
-      val when is_list(val) ->
-        unless Enum.all?(val, &is_binary/1) do
-          raise """
-          Provider "#{provider_id}": error_rules[#{idx}].message_contains list must \
-          contain only strings, got: #{inspect(val)}
-          """
+      {:ok, val} when is_list(val) ->
+        cond do
+          val == [] ->
+            raise "Provider \"#{provider_id}\": error_rules[#{idx}].message_contains must contain at least one pattern."
+
+          length(val) > @max_message_patterns_per_rule ->
+            raise "Provider \"#{provider_id}\": error_rules[#{idx}].message_contains exceeds #{@max_message_patterns_per_rule} patterns."
+
+          not Enum.all?(val, &is_binary/1) ->
+            raise """
+            Provider "#{provider_id}": error_rules[#{idx}].message_contains list must \
+            contain only strings, got: #{inspect(val)}
+            """
+
+          true ->
+            Enum.each(val, &validate_message_pattern!(provider_id, idx, &1))
         end
 
-      val ->
+      {:ok, val} ->
         raise """
         Provider "#{provider_id}": error_rules[#{idx}].message_contains must be a \
         string or list of strings, got: #{inspect(val)}
         """
+    end
+  end
+
+  defp validate_message_pattern!(provider_id, idx, pattern) do
+    cond do
+      String.trim(pattern) == "" ->
+        raise "Provider \"#{provider_id}\": error_rules[#{idx}].message_contains patterns must not be empty."
+
+      byte_size(pattern) > @max_message_pattern_bytes ->
+        raise "Provider \"#{provider_id}\": error_rules[#{idx}].message_contains patterns must be at most #{@max_message_pattern_bytes} bytes."
+
+      true ->
+        :ok
     end
   end
 

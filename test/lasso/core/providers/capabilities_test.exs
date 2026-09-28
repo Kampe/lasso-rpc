@@ -127,6 +127,26 @@ defmodule Lasso.RPC.Providers.CapabilitiesTest do
   end
 
   describe "classify_error/3" do
+    test "malformed and oversized runtime rules never override the bounded rule budget" do
+      assert :default = Capabilities.classify_error(30, "quota", %{error_rules: :invalid})
+
+      rules =
+        List.duplicate(%{code: 31, category: :rate_limit}, 32) ++
+          [%{code: 30, category: :rate_limit}]
+
+      assert :default = Capabilities.classify_error(30, "quota", %{error_rules: rules})
+
+      assert :default =
+               Capabilities.classify_error(30, "quota", %{
+                 error_rules: [
+                   %{
+                     message_contains: List.duplicate("missing", 8) ++ ["quota"],
+                     category: :rate_limit
+                   }
+                 ]
+               })
+    end
+
     test "nil capabilities returns :default" do
       assert :default = Capabilities.classify_error(-32000, "some error", nil)
     end
@@ -210,6 +230,29 @@ defmodule Lasso.RPC.Providers.CapabilitiesTest do
   end
 
   describe "validate!/2" do
+    test "rejects unbounded or malformed declarative error rules at configuration time" do
+      valid_rule = %{code: 30, category: :rate_limit}
+
+      invalid = [
+        {%{error_rules: :invalid}, ~r/error_rules must be a list/},
+        {%{error_rules: List.duplicate(valid_rule, 33)}, ~r/exceeds the maximum of 32/},
+        {%{error_rules: [:invalid]}, ~r/error_rules\[0\] must be a map/},
+        {%{error_rules: [%{code: "30", category: :rate_limit}]}, ~r/code must be an integer/},
+        {%{error_rules: [%{message_contains: " ", category: :rate_limit}]},
+         ~r/patterns must not be empty/},
+        {%{error_rules: [%{message_contains: String.duplicate("a", 257), category: :rate_limit}]},
+         ~r/at most 256 bytes/},
+        {%{error_rules: [%{message_contains: List.duplicate("a", 9), category: :rate_limit}]},
+         ~r/exceeds 8 patterns/}
+      ]
+
+      for {caps, message} <- invalid do
+        assert_raise RuntimeError, message, fn ->
+          Capabilities.validate!("test_provider", caps)
+        end
+      end
+    end
+
     test "nil capabilities passes" do
       assert :ok = Capabilities.validate!("test_provider", nil)
     end

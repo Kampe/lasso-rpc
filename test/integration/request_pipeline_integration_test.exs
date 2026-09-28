@@ -793,6 +793,57 @@ defmodule Lasso.RPC.RequestPipelineIntegrationTest do
   end
 
   describe "adapter validation and parameter handling" do
+    test "object and array log filters skip a provider whose block-range limit they exceed", %{
+      chain: chain
+    } do
+      caller = self()
+
+      setup_providers([
+        %{
+          id: "bounded-logs",
+          profile: "public",
+          capabilities: %{limits: %{max_block_range: 10}},
+          behavior:
+            {:conditional,
+             fn method, params, _state ->
+               send(caller, {:bounded_request, method, params})
+               {:ok, []}
+             end}
+        },
+        %{
+          id: "unbounded-logs",
+          profile: "public",
+          behavior:
+            {:conditional,
+             fn method, params, _state ->
+               send(caller, {:unbounded_request, method, params})
+               {:ok, []}
+             end}
+        }
+      ])
+
+      filter = %{"fromBlock" => "0x1", "toBlock" => "0x20"}
+
+      for params <- [filter, [filter]] do
+        assert {:ok, %Response.Success{}, _ctx} =
+                 RequestPipeline.execute_via_channels(
+                   chain,
+                   "eth_getLogs",
+                   params,
+                   %RequestOptions{
+                     profile: "public",
+                     provider_override: "bounded-logs",
+                     failover_on_override: true,
+                     strategy: :priority,
+                     timeout_ms: 5_000
+                   }
+                 )
+
+        assert_receive {:unbounded_request, "eth_getLogs", ^params}
+        refute_received {:bounded_request, "eth_getLogs", _}
+      end
+    end
+
     test "skips providers that reject parameters", %{chain: chain} do
       profile = "public"
 
