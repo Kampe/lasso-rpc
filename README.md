@@ -29,8 +29,7 @@ try it in one command. Add any EVM chain and your own providers in YAML.
 
 ## Managed Lasso 
 
-[lasso.sh](https://lasso.sh)  
-[Setup with your agent](https://lasso.sh/llms.txt)
+[lasso.sh](https://lasso.sh) · [Setup with your agent](https://lasso.sh/llms.txt)
 
 ## Why Lasso
 
