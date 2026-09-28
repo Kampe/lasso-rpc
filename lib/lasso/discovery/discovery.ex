@@ -39,7 +39,7 @@ defmodule Lasso.Discovery do
           url: String.t(),
           probes_run: [atom()],
           timestamp: DateTime.t(),
-          methods: map() | nil,
+          methods: [map()] | {:aborted, atom()} | nil,
           limits: map() | nil,
           websocket: map() | nil
         }
@@ -89,11 +89,11 @@ defmodule Lasso.Discovery do
 
   Shorthand for `probe(url, probes: [:methods], ...)`.
   """
-  @spec probe_methods(String.t(), keyword()) :: [map()]
+  @spec probe_methods(String.t(), keyword()) :: [map()] | {:aborted, atom()}
   def probe_methods(url, opts \\ []) do
     level = Keyword.get(opts, :level, :standard)
-    timeout = Keyword.get(opts, :timeout, 3000)
-    concurrent = Keyword.get(opts, :concurrent, 5)
+    timeout = Keyword.get(opts, :timeout, 8_000)
+    concurrent = Keyword.get(opts, :concurrent, 3)
 
     MethodSupport.probe(url,
       level: level,
@@ -179,7 +179,7 @@ defmodule Lasso.Discovery do
       end
 
     config =
-      if results[:methods] do
+      if is_list(results[:methods]) do
         blocked = MethodSupport.find_blocked_categories(results.methods)
         unsupported = MethodSupport.find_unsupported_methods(results.methods, blocked)
 
@@ -210,8 +210,8 @@ defmodule Lasso.Discovery do
     # Methods probe requires HTTP URL
     http_url = ensure_http_url(url)
     level = Keyword.get(opts, :method_level, :standard)
-    timeout = Keyword.get(opts, :timeout, 3000)
-    concurrent = Keyword.get(opts, :concurrent, 5)
+    timeout = Keyword.get(opts, :timeout, 8_000)
+    concurrent = Keyword.get(opts, :concurrent, 3)
 
     MethodSupport.probe(http_url, level: level, timeout: timeout, concurrent: concurrent)
   end

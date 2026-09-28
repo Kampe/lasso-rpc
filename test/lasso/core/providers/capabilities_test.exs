@@ -230,6 +230,21 @@ defmodule Lasso.RPC.Providers.CapabilitiesTest do
   end
 
   describe "validate!/2" do
+    test "accepts supported timeout and block-unavailable error categories" do
+      for category <- [:timeout, :block_not_available] do
+        assert :ok =
+                 Capabilities.validate!("test_provider", %{
+                   error_rules: [%{code: -32_000, category: category}]
+                 })
+      end
+    end
+
+    test "reports non-map capabilities as a configuration error" do
+      assert_raise RuntimeError, ~r/capabilities must be a map or null/, fn ->
+        Capabilities.validate!("test_provider", "invalid")
+      end
+    end
+
     test "rejects unbounded or malformed declarative error rules at configuration time" do
       valid_rule = %{code: 30, category: :rate_limit}
 
