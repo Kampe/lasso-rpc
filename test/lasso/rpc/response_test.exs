@@ -232,13 +232,16 @@ defmodule Lasso.RPC.ResponseTest do
       assert [%Success{id: 1}, %Success{id: 2}, %Success{id: 3}] = batch.items
     end
 
-    test "rejects duplicate response IDs" do
+    test "preserves repeated response IDs in request order" do
       items = [
         %Success{id: 1, jsonrpc: "2.0", raw_bytes: ~s({"jsonrpc":"2.0","id":1,"result":"a"})},
         %Success{id: 1, jsonrpc: "2.0", raw_bytes: ~s({"jsonrpc":"2.0","id":1,"result":"b"})}
       ]
 
-      assert {:error, {:duplicate_response_ids, [1]}} = Batch.build(items, [1, 1])
+      assert {:ok, batch} = Batch.build(items, [1, 1])
+      assert [%Success{raw_bytes: first}, %Success{raw_bytes: second}] = batch.items
+      assert first =~ ~s("result":"a")
+      assert second =~ ~s("result":"b")
     end
 
     test "rejects missing response IDs" do
@@ -247,6 +250,15 @@ defmodule Lasso.RPC.ResponseTest do
       ]
 
       assert {:error, {:missing_response_id, 2}} = Batch.build(items, [1, 2])
+    end
+
+    test "rejects unmatched response items" do
+      items = [
+        %Success{id: 1, jsonrpc: "2.0", raw_bytes: ~s({"jsonrpc":"2.0","id":1,"result":"a"})},
+        %Success{id: 2, jsonrpc: "2.0", raw_bytes: ~s({"jsonrpc":"2.0","id":2,"result":"b"})}
+      ]
+
+      assert {:error, {:unexpected_response_ids, [2]}} = Batch.build(items, [1])
     end
   end
 
