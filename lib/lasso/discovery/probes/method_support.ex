@@ -235,6 +235,10 @@ defmodule Lasso.Discovery.Probes.MethodSupport do
 
   defp rate_limited_result?(_), do: false
 
+  defp quota_exhausted_result?(%{error_type: :rate_limit, error: error}),
+    do: ErrorClassifier.quota_exhausted?(error)
+
+  defp quota_exhausted_result?(%{error_type: _}), do: false
   defp quota_exhausted_result?(%{error_code: 402}), do: true
 
   defp quota_exhausted_result?(%{error: error}) when is_binary(error),
