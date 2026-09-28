@@ -29,9 +29,6 @@
   ~r"lib/lasso/core/transport/websocket/client.ex.*pattern_match",
   ~r"lib/lasso/core/transport/websocket/client.ex.*unused_fun",
 
-  # Discovery/probing error handling
-  ~r"lib/lasso/discovery/probes/method_support.ex.*pattern_match",
-
   # VM metrics collector error handling
   ~r"lib/lasso/vm_metrics_collector.ex.*pattern_match",
 
