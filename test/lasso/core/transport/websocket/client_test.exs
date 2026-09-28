@@ -1,5 +1,5 @@
 defmodule Lasso.RPC.Transport.WebSocket.ClientTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Lasso.RPC.Transport.WebSocket.Client
 
@@ -58,28 +58,28 @@ defmodule Lasso.RPC.Transport.WebSocket.ClientTest do
                ]
              )
 
-    assert_receive :resolved_once
+    assert_receive :resolved_once, 1_000
     refute_receive :resolved_once
-    assert_receive :connected
+    assert_receive :connected, 1_000
 
-    assert_receive {:handshake, request}
+    assert_receive {:handshake, request}, 1_000
     assert request.request_line == "GET /rpc/path?network=mainnet HTTP/1.1"
     assert request.headers["host"] == "authority.example.test:#{port}"
     assert request.headers["authorization"] == "Bearer test-token"
 
     Client.cast(client, {:send, "hello"})
-    assert_receive {:write_acknowledged, "hello"}
-    assert_receive {:client_frame, {:text, "hello"}}
+    assert_receive {:write_acknowledged, "hello"}, 1_000
+    assert_receive {:client_frame, {:text, "hello"}}, 1_000
 
     send(server.pid, {:send_ping, "probe"})
-    assert_receive {:client_frame, {:pong, "probe"}}
+    assert_receive {:client_frame, {:pong, "probe"}}, 1_000
 
     monitor = Process.monitor(client)
     send(server.pid, {:send_close, 1_012, "restart"})
 
-    assert_receive {:client_frame, {:close, 1_012, "restart"}}
-    assert_receive {:disconnected, %{reason: {:remote, 1_012, "restart"}}}
-    assert_receive {:DOWN, ^monitor, :process, ^client, :normal}
+    assert_receive {:client_frame, {:close, 1_012, "restart"}}, 1_000
+    assert_receive {:disconnected, %{reason: {:remote, 1_012, "restart"}}}, 1_000
+    assert_receive {:DOWN, ^monitor, :process, ^client, :normal}, 1_000
 
     stop_server(server)
   end
@@ -113,6 +113,78 @@ defmodule Lasso.RPC.Transport.WebSocket.ClientTest do
                %{owner: self()},
                resolver: resolver
              )
+  end
+
+  test "disconnects before decoding a frame whose declared payload exceeds the message limit" do
+    previous = Application.get_env(:lasso, :upstream_response_byte_limit)
+    Application.put_env(:lasso, :upstream_response_byte_limit, 32)
+
+    on_exit(fn ->
+      if is_nil(previous),
+        do: Application.delete_env(:lasso, :upstream_response_byte_limit),
+        else: Application.put_env(:lasso, :upstream_response_byte_limit, previous)
+    end)
+
+    server = start_server(self())
+
+    assert {:ok, client} =
+             Client.start_link(
+               "ws://bounded.example.test:#{server.port}/rpc",
+               Handler,
+               %{owner: self()},
+               owner: self(),
+               resolver: fn _host -> {:ok, [{127, 0, 0, 1}]} end
+             )
+
+    assert_receive :connected
+    assert_receive {:handshake, _request}
+    monitor = Process.monitor(client)
+
+    send(server.pid, {:send_text, String.duplicate("x", 33)})
+
+    assert_receive {:disconnected, %{reason: {:error, :message_too_large}}}, 1_000
+    assert_receive {:DOWN, ^monitor, :process, ^client, :normal}, 1_000
+    refute_receive {:frame, _frame}
+    stop_server(server)
+  end
+
+  test "bounds fragmented messages across separately delivered frames" do
+    previous = Application.get_env(:lasso, :upstream_response_byte_limit)
+    Application.put_env(:lasso, :upstream_response_byte_limit, 32)
+
+    on_exit(fn ->
+      if is_nil(previous),
+        do: Application.delete_env(:lasso, :upstream_response_byte_limit),
+        else: Application.put_env(:lasso, :upstream_response_byte_limit, previous)
+    end)
+
+    server = start_server(self())
+
+    assert {:ok, client} =
+             Client.start_link(
+               "ws://bounded.example.test:#{server.port}/rpc",
+               Handler,
+               %{owner: self()},
+               owner: self(),
+               resolver: fn _host -> {:ok, [{127, 0, 0, 1}]} end
+             )
+
+    assert_receive :connected
+    assert_receive {:handshake, _request}
+    monitor = Process.monitor(client)
+
+    send(server.pid, {
+      :send_chunks,
+      [
+        server_frame(0x1, String.duplicate("a", 20), false),
+        server_frame(0x0, String.duplicate("b", 13), true)
+      ]
+    })
+
+    assert_receive {:disconnected, %{reason: {:error, :message_too_large}}}, 1_000
+    assert_receive {:DOWN, ^monitor, :process, ^client, :normal}, 1_000
+    refute_receive {:frame, _frame}
+    stop_server(server)
   end
 
   defp start_server(owner) do
@@ -196,6 +268,18 @@ defmodule Lasso.RPC.Transport.WebSocket.ClientTest do
         send(owner, {:client_frame, receive_client_frame(socket)})
         server_loop(socket, owner)
 
+      {:send_text, payload} ->
+        :ok = :gen_tcp.send(socket, server_frame(0x1, payload))
+        server_loop(socket, owner)
+
+      {:send_chunks, chunks} ->
+        Enum.each(chunks, fn chunk ->
+          :ok = :gen_tcp.send(socket, chunk)
+          Process.sleep(10)
+        end)
+
+        server_loop(socket, owner)
+
       :stop ->
         :gen_tcp.close(socket)
     after
@@ -243,7 +327,15 @@ defmodule Lasso.RPC.Transport.WebSocket.ClientTest do
     |> :binary.list_to_bin()
   end
 
-  defp server_frame(opcode, payload) do
-    <<1::1, 0::3, opcode::4, 0::1, byte_size(payload)::7, payload::binary>>
+  defp server_frame(opcode, payload, final? \\ true) do
+    final = if final?, do: 1, else: 0
+
+    case byte_size(payload) do
+      length when length < 126 ->
+        <<final::1, 0::3, opcode::4, 0::1, length::7, payload::binary>>
+
+      length when length <= 65_535 ->
+        <<final::1, 0::3, opcode::4, 0::1, 126::7, length::16, payload::binary>>
+    end
   end
 end
