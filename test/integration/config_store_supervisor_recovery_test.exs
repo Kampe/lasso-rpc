@@ -37,6 +37,34 @@ defmodule Lasso.Config.ConfigStoreSupervisorRecoveryTest do
     end)
   end
 
+  test "a suspended BlockSync supervisor bounds profile activation and recovers" do
+    {spec, chain_id, provider_id} = profile_spec()
+    supervisor = Lasso.BlockSync.DynamicSupervisor
+    supervisor_pid = Process.whereis(supervisor)
+
+    on_exit(fn ->
+      :sys.resume(supervisor_pid)
+      ConfigStore.remove_profile(spec.profile_id)
+    end)
+
+    assert :ok = :sys.suspend(supervisor_pid)
+    store = Process.whereis(ConfigStore)
+    started_at = System.monotonic_time(:millisecond)
+
+    assert {:error, {:runtime_reconcile_pending, _}} = ConfigStore.inject_profile(spec)
+    assert System.monotonic_time(:millisecond) - started_at < 4_000
+    assert Process.whereis(ConfigStore) == store
+    assert ConfigStore.status().runtime_reconcile_pending
+
+    assert :ok = :sys.resume(supervisor_pid)
+    instance_id = Catalog.lookup_instance_id(spec.profile_id, chain_id, provider_id)
+
+    assert_eventually(fn ->
+      is_pid(GenServer.whereis(Worker.via(chain_id, instance_id))) and
+        not ConfigStore.status().runtime_reconcile_pending
+    end)
+  end
+
   test "a restarted profile-chain supervisor restores published chains without reload" do
     {spec, chain_id, _provider_id} = profile_spec()
     supervisor = Lasso.ProfileChainSupervisor

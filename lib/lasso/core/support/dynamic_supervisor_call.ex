@@ -15,19 +15,62 @@ defmodule Lasso.Core.Support.DynamicSupervisorCall do
           | module()
           | :supervisor.child_spec()
   @type call_error :: {:supervisor_exit, term()}
+  @call_timeout_ms 2_000
 
-  @spec start_child(supervisor(), child_spec()) ::
-          DynamicSupervisor.on_start_child() | {:error, call_error()}
-  def start_child(supervisor, child_spec) do
-    DynamicSupervisor.start_child(supervisor, child_spec)
+  @doc "Lists running children with a bound suitable for reconciliation."
+  @spec children(supervisor()) :: {:ok, [tuple()]} | {:error, call_error()}
+  def children(supervisor) do
+    {:ok, GenServer.call(supervisor, :which_children, @call_timeout_ms)}
   catch
     :exit, reason -> {:error, {:supervisor_exit, reason}}
   end
 
+  @spec start_child(supervisor(), child_spec()) ::
+          DynamicSupervisor.on_start_child() | {:error, call_error()}
+  def start_child(supervisor, child_spec) do
+    bounded_call(fn -> DynamicSupervisor.start_child(supervisor, child_spec) end)
+  end
+
   @spec terminate_child(supervisor(), pid()) :: :ok | {:error, term()}
   def terminate_child(supervisor, pid) when is_pid(pid) do
-    DynamicSupervisor.terminate_child(supervisor, pid)
-  catch
-    :exit, reason -> {:error, {:supervisor_exit, reason}}
+    bounded_call(fn -> DynamicSupervisor.terminate_child(supervisor, pid) end)
+  end
+
+  defp bounded_call(operation) do
+    caller = self()
+    token = make_ref()
+
+    {pid, monitor} =
+      spawn_monitor(fn ->
+        result =
+          try do
+            operation.()
+          catch
+            :exit, reason -> {:error, {:supervisor_exit, reason}}
+          end
+
+        send(caller, {token, result})
+      end)
+
+    receive do
+      {^token, result} ->
+        Process.demonitor(monitor, [:flush])
+        result
+
+      {:DOWN, ^monitor, :process, ^pid, reason} ->
+        {:error, {:supervisor_exit, reason}}
+    after
+      @call_timeout_ms ->
+        Process.demonitor(monitor, [:flush])
+        Process.exit(pid, :kill)
+
+        receive do
+          {^token, _late_result} -> :ok
+        after
+          0 -> :ok
+        end
+
+        {:error, {:supervisor_exit, :timeout}}
+    end
   end
 end
