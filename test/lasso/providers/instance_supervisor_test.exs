@@ -2,6 +2,7 @@ defmodule Lasso.Providers.InstanceSupervisorTest do
   use ExUnit.Case, async: false
 
   alias Lasso.Config.ConfigStore
+  alias Lasso.Core.Support.CircuitBreaker
   alias Lasso.Providers.{Catalog, InstanceSupervisor}
 
   @profile "is_test"
@@ -80,6 +81,18 @@ defmodule Lasso.Providers.InstanceSupervisorTest do
 
       assert {:circuit, :http} in child_ids
       assert {:circuit, :ws} in child_ids
+
+      assert child_ids == [
+               {:ws_connection, instance_id},
+               {:subscription_manager, instance_id},
+               {:circuit, :ws},
+               {:circuit, :http}
+             ]
+
+      http_breaker = GenServer.whereis(CircuitBreaker.via_name({instance_id, :http}))
+      ws_breaker = GenServer.whereis(CircuitBreaker.via_name({instance_id, :ws}))
+      assert :sys.get_state(http_breaker).success_threshold == 2
+      assert :sys.get_state(ws_breaker).success_threshold == 1
     end
   end
 

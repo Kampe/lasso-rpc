@@ -1782,14 +1782,87 @@ defmodule Lasso.Core.Streaming.StreamCoordinator do
     end
   end
 
-  defp handle_backfill_failure(state, _reason) do
+  defp handle_backfill_failure(state, reason) do
     Logger.error("Backfill task failed",
       chain_id: state.chain_id,
-      key: inspect(state.key)
+      key: inspect(state.key),
+      provider_id: state.failover_context.http_provider_id,
+      reason: inspect(reason)
     )
 
-    # Treat as resubscribe failure
-    handle_resubscribe_failure(state, :backfill_failed)
+    case retry_backfill_with_fallback(state) do
+      {:ok, next_state} ->
+        start_backfill_after_replacement(
+          next_state,
+          next_state.failover_context.new_provider_id,
+          nil
+        )
+
+      {:error, :no_http_provider} ->
+        handle_resubscribe_failure(state, :backfill_failed)
+    end
+  end
+
+  defp retry_backfill_with_fallback(state) do
+    context = state.failover_context
+
+    excluded =
+      [context.http_provider_id | context.backfill_context.excluded_providers]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+
+    with remaining_ms when remaining_ms > 0 <- recovery_remaining_ms(state.recovery_deadline_us),
+         {:ok, provider_id} <- pick_best_http_provider(state.profile, state.chain_id, excluded) do
+      plan =
+        GapFiller.Plan.new(
+          state.profile,
+          state.chain_id,
+          provider_id,
+          self(),
+          min(state.backfill_timeout, remaining_ms),
+          deadline_us: state.recovery_deadline_us,
+          requester: state.backfill_requester
+        )
+
+      backfill_context = %{
+        context.backfill_context
+        | excluded_providers: [provider_id | excluded],
+          plan: plan
+      }
+
+      failover_context = %{
+        context
+        | http_provider_id: provider_id,
+          backfill_plan: plan,
+          backfill_context: backfill_context,
+          backfill_owner_id: nil,
+          backfill_owner_pid: nil,
+          backfill_owner_ref: nil,
+          backfill_task_ref: nil,
+          replay_buffer: [],
+          replay_buffer_count: 0,
+          replay_buffer_bytes: 0
+      }
+
+      retained_bytes =
+        StreamState.retained_bytes(state.state) + failover_context.event_buffer_bytes
+
+      case ContinuityBudget.set_stream_bytes(state.continuity_budget, self(), retained_bytes) do
+        :ok ->
+          Logger.warning("Retrying continuity backfill with alternate HTTP provider",
+            chain_id: state.chain_id,
+            key: inspect(state.key),
+            provider_id: provider_id
+          )
+
+          {:ok, %{state | failover_context: failover_context}}
+
+        {:error, _reason} ->
+          {:error, :no_http_provider}
+      end
+    else
+      _ -> {:error, :no_http_provider}
+    end
   end
 
   defp enter_degraded_mode(state, budget) do
@@ -1942,7 +2015,8 @@ defmodule Lasso.Core.Streaming.StreamCoordinator do
            "eth_getBlockByNumber",
            strategy: :fastest,
            protocol: :http,
-           exclude: excluded
+           exclude: excluded,
+           request_origin: :system
          ) do
       {:ok, provider_id} -> {:ok, provider_id}
       _ -> {:error, :no_http_provider}

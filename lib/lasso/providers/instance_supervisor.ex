@@ -24,22 +24,31 @@ defmodule Lasso.Providers.InstanceSupervisor do
   def init(instance_id) do
     case Catalog.get_instance(instance_id) do
       {:ok, instance} ->
-        circuit_config =
-          %{
-            failure_threshold: 5,
-            recovery_timeout: 60_000,
-            success_threshold: 2,
-            shared_mode: true
-          }
-          |> Map.merge(Map.new(Application.get_env(:lasso, :circuit_breaker, [])))
+        configured_circuit = Map.new(Application.get_env(:lasso, :circuit_breaker, []))
+
+        circuit_config = %{
+          failure_threshold: 5,
+          recovery_timeout: 60_000,
+          success_threshold: 2,
+          shared_mode: true
+        }
+
+        http_circuit_config =
+          circuit_config |> Map.merge(configured_circuit) |> Map.put(:shared_mode, true)
+
+        ws_circuit_config =
+          circuit_config
+          |> Map.put(:success_threshold, 1)
+          |> Map.merge(configured_circuit)
           |> Map.put(:shared_mode, true)
 
         children =
           []
-          |> maybe_add_circuit(:http, instance_id, instance.url, circuit_config)
-          |> maybe_add_circuit(:ws, instance_id, instance.ws_url, circuit_config)
-          |> maybe_add_ws_connection(instance_id, instance.ws_url)
+          |> maybe_add_circuit(:http, instance_id, instance.url, http_circuit_config)
+          |> maybe_add_circuit(:ws, instance_id, instance.ws_url, ws_circuit_config)
           |> maybe_add_subscription_manager(instance_id, instance.chain_id, instance.ws_url)
+          |> maybe_add_ws_connection(instance_id, instance.ws_url)
+          |> Enum.reverse()
 
         Supervisor.init(children, strategy: :one_for_one)
 

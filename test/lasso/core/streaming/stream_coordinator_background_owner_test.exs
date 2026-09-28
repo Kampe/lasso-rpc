@@ -5,7 +5,7 @@ defmodule Lasso.Core.Streaming.StreamCoordinatorBackgroundOwnerTest do
   alias Lasso.Config.ConfigStore
   alias Lasso.Core.Support.CircuitBreaker.{Snapshot, Storage}
   alias Lasso.Providers.Catalog
-  alias Lasso.RPC.Channel
+  alias Lasso.RPC.{Channel, Selection}
 
   alias Lasso.Core.Streaming.{
     ClientSubscriptionRegistry,
@@ -1804,5 +1804,116 @@ defmodule Lasso.Core.Streaming.StreamCoordinatorBackgroundOwnerTest do
     state = await_state(pid, &(&1.failover_status == :degraded))
     assert state.failover_context == nil
     assert Process.alive?(pid)
+  end
+
+  @tag :integration
+  test "failed HTTP backfill tries an alternate source before dropping the stream" do
+    chain_id = System.unique_integer([:positive])
+    profile = "backfill-retry-#{chain_id}"
+    key = {:newHeads}
+    observer = self()
+
+    providers =
+      for {id, priority, ws?} <- [
+            {"ws-old", 1, true},
+            {"ws-new", 2, true},
+            {"http-bad", 3, false},
+            {"http-good", 4, false}
+          ] do
+        %{
+          id: id,
+          name: id,
+          url: "https://#{id}.example.com",
+          ws_url: if(ws?, do: "wss://#{id}.example.com", else: nil),
+          priority: priority
+        }
+      end
+
+    :ok =
+      ConfigStore.register_chain_runtime(profile, chain_id, %{
+        chain_id: chain_id,
+        name: "Backfill retry",
+        providers: providers
+      })
+
+    Catalog.build_from_config()
+
+    good_instance = Catalog.lookup_instance_id(profile, chain_id, "http-good")
+
+    :ets.insert(
+      :lasso_instance_state,
+      {{:health_probe, good_instance}, %{status: :healthy, http_status: :healthy}}
+    )
+
+    Snapshot.put(%Snapshot{
+      breaker_id: {good_instance, :http},
+      state: :closed,
+      generation: 1,
+      epoch: 1,
+      owner_pid: self(),
+      ready?: true,
+      recovery_deadline_us: nil,
+      half_open_capacity: 1,
+      half_open_inflight: 0,
+      control_health: :healthy
+    })
+
+    channel =
+      Channel.new(profile, chain_id, "http-good", :http, self(), Lasso.RPC.Transports.HTTP)
+
+    :ets.insert(:transport_channel_cache, {{profile, chain_id, "http-good", :http}, channel})
+
+    assert {:ok, "http-good"} =
+             Selection.select_provider(profile, chain_id, "eth_getBlockByNumber",
+               strategy: :fastest,
+               protocol: :http,
+               exclude: ["ws-old", "ws-new", "http-bad"]
+             )
+
+    on_exit(fn ->
+      :ets.delete(:lasso_instance_state, {:health_probe, good_instance})
+      :ets.delete(:transport_channel_cache, {profile, chain_id, "http-good", :http})
+      :ets.delete(Storage.snapshot_table(), {good_instance, :http})
+      ConfigStore.unregister_chain_runtime(profile, chain_id)
+      Catalog.build_from_config()
+    end)
+
+    requester = fn _scope, _chain_id, method, params, opts ->
+      send(observer, {:backfill_attempt, opts.provider_override, method, params})
+
+      case {opts.provider_override, method, params} do
+        {"http-bad", _, _} -> {:error, :upstream_failed, %{}}
+        {"http-good", "eth_blockNumber", []} -> {:ok, "0xb", %{}}
+        {"http-good", "eth_getBlockByNumber", ["0xa", false]} -> {:ok, new_head(10), %{}}
+        {"http-good", "eth_getBlockByNumber", ["0xb", false]} -> {:ok, new_head(11), %{}}
+      end
+    end
+
+    replacement = fn _profile, _chain_id, _key, provider_id, coordinator_pid ->
+      send(coordinator_pid, {:subscription_confirmed, provider_id, "upstream-new"})
+    end
+
+    start_supervised!({ClientSubscriptionRegistry, {profile, chain_id}})
+    :ok = ClientSubscriptionRegistry.add_client(profile, chain_id, "retry-client", self(), key)
+
+    {:ok, pid} =
+      StreamCoordinator.start_link(
+        {profile, chain_id, key,
+         primary_provider_id: "ws-old",
+         backfill_provider_selector: fn _, _, _ -> {:ok, "http-bad"} end,
+         replacement_requester: replacement,
+         backfill_requester: requester,
+         max_failover_attempts: 1,
+         recovery_timeout_ms: 5_000}
+      )
+
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+    GenServer.cast(pid, {:upstream_event, "ws-old", "upstream-old", new_head(10), 1})
+    assert_receive {:subscription_event, _}
+    GenServer.cast(pid, {:provider_unhealthy, "ws-old", "ws-new"})
+
+    assert_receive {:backfill_attempt, "http-bad", "eth_blockNumber", []}, 2_000
+    assert_receive {:backfill_attempt, "http-good", "eth_blockNumber", []}, 2_000
+    assert await_state(pid, &(&1.failover_status == :active)).primary_provider_id == "ws-new"
   end
 end

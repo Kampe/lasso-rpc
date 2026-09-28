@@ -193,6 +193,83 @@ defmodule Lasso.Telemetry do
         description: "Events dropped in degraded mode",
         tags: [:chain, :reason]
       ),
+      counter("lasso.stream.continuity_resource_exhausted.count",
+        event_name: [:lasso, :stream, :continuity_resource_exhausted],
+        description: "Subscriptions terminated by a local continuity resource bound",
+        tags: [:chain_id, :profile, :subscription_type, :reason]
+      ),
+      summary("lasso.stream.continuity_resource_exhausted.retained_bytes",
+        event_name: [:lasso, :stream, :continuity_resource_exhausted],
+        measurement: :retained_bytes,
+        description: "Continuity bytes at terminal local admission"
+      ),
+      counter("lasso.stream.slow_consumer.count",
+        event_name: [:lasso, :stream, :slow_consumer],
+        description: "Downstream subscriptions terminated for bounded delivery exhaustion",
+        tags: [:chain_id, :profile, :reason]
+      ),
+      counter("lasso.subs.reorg_repair.started.count",
+        event_name: [:lasso, :subs, :reorg_repair, :started],
+        description: "Connected newHeads discontinuities entering canonical repair",
+        tags: [:profile, :chain_id, :provider_id, :http_provider_id]
+      ),
+      distribution("lasso.subs.reorg_repair.completed.duration",
+        event_name: [:lasso, :subs, :reorg_repair, :completed],
+        measurement: :duration_ms,
+        unit: :millisecond,
+        description: "Connected newHeads canonical repair duration",
+        tags: [:profile, :chain_id]
+      ),
+      counter("lasso.subs.reorg_repair.stale_head_dropped.count",
+        event_name: [:lasso, :subs, :reorg_repair, :stale_head_dropped],
+        description: "Buffered fork heads suppressed after canonical HTTP reconciliation",
+        tags: [:profile, :chain_id]
+      ),
+      counter("lasso.stream.continuity_budget.rejected.count",
+        event_name: [:lasso, :stream, :continuity_budget, :rejected],
+        description: "Node-wide WebSocket continuity byte admission rejections",
+        tags: [:kind, :reason]
+      ),
+      last_value("lasso.stream.continuity_budget.used_bytes",
+        event_name: [:lasso, :stream, :continuity_budget, :snapshot],
+        measurement: :used_bytes,
+        description: "Bytes retained by replay histories and queued downstream deliveries"
+      ),
+      last_value("lasso.stream.continuity_budget.owner_count",
+        event_name: [:lasso, :stream, :continuity_budget, :snapshot],
+        measurement: :owners,
+        description: "Processes holding WebSocket continuity bytes"
+      ),
+      last_value("lasso.stream.continuity_budget.delivery_messages",
+        event_name: [:lasso, :stream, :continuity_budget, :snapshot],
+        measurement: :delivery_messages,
+        description: "Admitted downstream subscription messages awaiting socket handling"
+      ),
+      last_value("lasso.stream.ingress.used_bytes",
+        event_name: [:lasso, :stream, :ingress, :snapshot],
+        measurement: :used_bytes,
+        description: "Reserved internal WebSocket mailbox and processing bytes"
+      ),
+      last_value("lasso.stream.ingress.messages",
+        event_name: [:lasso, :stream, :ingress, :snapshot],
+        measurement: :messages,
+        description: "Admitted internal WebSocket payload messages"
+      ),
+      last_value("lasso.stream.ingress.rejected",
+        event_name: [:lasso, :stream, :ingress, :snapshot],
+        measurement: :rejected,
+        description: "Cumulative internal WebSocket admission rejections"
+      ),
+      last_value("lasso.stream.memory.used_bytes",
+        event_name: [:lasso, :stream, :memory, :snapshot],
+        measurement: :used_bytes,
+        description: "Combined internal ingress, replay history, and downstream reservation bytes"
+      ),
+      last_value("lasso.stream.memory.limit_bytes",
+        event_name: [:lasso, :stream, :memory, :snapshot],
+        measurement: :limit_bytes,
+        description: "Combined configured WebSocket memory reservation envelope"
+      ),
 
       # WebSocket pending cleanup
       counter("lasso.websocket.pending_cleanup.count",
@@ -266,7 +343,8 @@ defmodule Lasso.Telemetry do
     [
       # Periodic system metrics
       {__MODULE__, :measure_vm_memory, []},
-      {__MODULE__, :measure_run_queue, []}
+      {__MODULE__, :measure_run_queue, []},
+      {__MODULE__, :measure_continuity_budget, []}
     ]
   end
 
@@ -286,5 +364,38 @@ defmodule Lasso.Telemetry do
       %{total: total, cpu: cpu, io: elem(io, 0)},
       %{}
     )
+  end
+
+  def measure_continuity_budget do
+    case Lasso.Core.Streaming.ContinuityBudget.stats() do
+      %{available?: true} = stats ->
+        :telemetry.execute(
+          [:lasso, :stream, :continuity_budget, :snapshot],
+          Map.take(stats, [
+            :used_bytes,
+            :stream_bytes,
+            :delivery_bytes,
+            :delivery_messages,
+            :peak_bytes,
+            :owners
+          ]),
+          %{}
+        )
+
+        ingress = Lasso.Core.Streaming.Ingress.stats()
+        :telemetry.execute([:lasso, :stream, :ingress, :snapshot], ingress, %{})
+
+        :telemetry.execute(
+          [:lasso, :stream, :memory, :snapshot],
+          %{
+            used_bytes: stats.used_bytes + ingress.used_bytes,
+            limit_bytes: stats.node_limit + ingress.node_bytes
+          },
+          %{}
+        )
+
+      _unavailable ->
+        :ok
+    end
   end
 end

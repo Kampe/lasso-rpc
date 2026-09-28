@@ -3,12 +3,54 @@ defmodule Lasso.Integration.WebSocketIngressTest do
 
   alias Lasso.Core.Streaming.{
     ClientSubscriptionRegistry,
+    ContinuityBudget,
     Ingress,
     InstanceSubscriptionRegistry,
     StreamCoordinator
   }
 
   alias Lasso.RPC.Transport.WebSocket.Handler
+
+  test "operator telemetry reports the combined bounded WebSocket memory envelope" do
+    handler_id = "stream-memory-#{System.unique_integer([:positive])}"
+    observer = self()
+
+    events = [
+      [:lasso, :stream, :continuity_budget, :snapshot],
+      [:lasso, :stream, :ingress, :snapshot],
+      [:lasso, :stream, :memory, :snapshot]
+    ]
+
+    :ok =
+      :telemetry.attach_many(
+        handler_id,
+        events,
+        fn event, measurements, _metadata, _config ->
+          send(observer, {:stream_measurement, event, measurements})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    budget = ContinuityBudget.stats()
+    ingress = Ingress.stats()
+    assert :ok = Lasso.Telemetry.measure_continuity_budget()
+
+    assert_receive {:stream_measurement, [:lasso, :stream, :continuity_budget, :snapshot],
+                    %{used_bytes: budget_bytes}}
+
+    assert_receive {:stream_measurement, [:lasso, :stream, :ingress, :snapshot],
+                    %{used_bytes: ingress_bytes}}
+
+    assert_receive {:stream_measurement, [:lasso, :stream, :memory, :snapshot],
+                    %{used_bytes: used_bytes, limit_bytes: limit_bytes}}
+
+    assert budget_bytes == budget.used_bytes
+    assert ingress_bytes == ingress.used_bytes
+    assert used_bytes == budget_bytes + ingress_bytes
+    assert limit_bytes == budget.node_limit + ingress.node_bytes
+  end
 
   test "a stalled upstream connection owner cannot accumulate unbounded frames" do
     owner = spawn(fn -> receive do: (:stop -> :ok) end)

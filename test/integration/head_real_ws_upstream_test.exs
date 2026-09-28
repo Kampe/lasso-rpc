@@ -160,7 +160,7 @@ defmodule Lasso.RPC.HeadRealWsUpstreamTest do
     :ok =
       :telemetry.attach(
         handler_id,
-        [:lasso, :block_sync, :observation, :invalid],
+        [:lasso, :upstream_subscriptions, :invalid_event],
         fn _event, _measurements, metadata, _config ->
           send(parent, {:invalid_head, metadata.instance_id})
         end,
