@@ -7,6 +7,7 @@ defmodule Lasso.RPC.Transport.WebSocket.Client do
 
   @default_connect_timeout 10_000
   @default_attempt_timeout 2_000
+  @default_message_limit 16 * 1_024 * 1_024
   @forbidden_headers ~w[host connection upgrade sec-websocket-accept sec-websocket-extensions sec-websocket-key sec-websocket-protocol sec-websocket-version]
 
   defstruct [
@@ -15,7 +16,8 @@ defmodule Lasso.RPC.Transport.WebSocket.Client do
     :websocket,
     :handler,
     :handler_state,
-    :owner_monitor
+    :owner_monitor,
+    frame_limit: {<<>>, 0, 0, false}
   ]
 
   @spec start_link(String.t(), module(), term(), keyword()) :: GenServer.on_start()
@@ -307,13 +309,118 @@ defmodule Lasso.RPC.Transport.WebSocket.Client do
   end
 
   defp decode_frames(data, state) do
-    case Mint.WebSocket.decode(state.websocket, data) do
-      {:ok, websocket, frames} ->
-        dispatch_frames(frames, %{state | websocket: websocket})
+    limit = Application.get_env(:lasso, :upstream_response_byte_limit, @default_message_limit)
+
+    with {:ok, frame_limit} <- check_frame_limit(data, state.frame_limit, limit),
+         {:ok, websocket, frames} <- Mint.WebSocket.decode(state.websocket, data),
+         false <- oversized_decoded_message?(frames, limit) do
+      dispatch_frames(frames, %{state | websocket: websocket, frame_limit: frame_limit})
+    else
+      :message_too_large ->
+        disconnect(state, {:error, :message_too_large})
+
+      true ->
+        disconnect(state, {:error, :message_too_large})
 
       {:error, websocket, reason} ->
         disconnect(%{state | websocket: websocket}, {:error, reason})
     end
+  end
+
+  defp check_frame_limit(<<>>, state, _limit), do: {:ok, state}
+
+  defp check_frame_limit(data, {header, 0, fragment_bytes, _reset?}, limit) do
+    case complete_frame_header(header, data) do
+      {:more, header} ->
+        {:ok, {header, 0, fragment_bytes, false}}
+
+      {:ok, opcode, final?, payload_bytes, rest} ->
+        message_bytes = if opcode == 0, do: fragment_bytes + payload_bytes, else: payload_bytes
+
+        if payload_bytes > limit or (opcode in [0, 1, 2] and message_bytes > limit) do
+          :message_too_large
+        else
+          {fragment_bytes, reset?} = fragment_state(opcode, final?, message_bytes, fragment_bytes)
+          fragment_bytes = if payload_bytes == 0 and reset?, do: 0, else: fragment_bytes
+          reset? = reset? and payload_bytes > 0
+          check_frame_limit(rest, {<<>>, payload_bytes, fragment_bytes, reset?}, limit)
+        end
+    end
+  end
+
+  defp check_frame_limit(data, {header, remaining, fragment_bytes, reset?}, limit) do
+    consumed = min(byte_size(data), remaining)
+    rest = binary_part(data, consumed, byte_size(data) - consumed)
+    remaining = remaining - consumed
+
+    if remaining == 0 do
+      fragment_bytes = if reset?, do: 0, else: fragment_bytes
+      check_frame_limit(rest, {header, 0, fragment_bytes, false}, limit)
+    else
+      {:ok, {header, remaining, fragment_bytes, reset?}}
+    end
+  end
+
+  defp complete_frame_header(header, data) do
+    {header, data} = take_header_bytes(header, data, 2)
+
+    if byte_size(header) < 2 do
+      {:more, header}
+    else
+      <<_final::1, _reserved::3, _opcode::4, masked::1, payload_length::7, _rest::binary>> =
+        header
+
+      extended_bytes =
+        if payload_length == 126, do: 2, else: if(payload_length == 127, do: 8, else: 0)
+
+      header_bytes = 2 + extended_bytes + if(masked == 1, do: 4, else: 0)
+      {header, data} = take_header_bytes(header, data, header_bytes)
+
+      if byte_size(header) < header_bytes do
+        {:more, header}
+      else
+        parse_frame_header(header, data, extended_bytes)
+      end
+    end
+  end
+
+  defp take_header_bytes(header, data, wanted_bytes) do
+    take = min(max(wanted_bytes - byte_size(header), 0), byte_size(data))
+    <<piece::binary-size(take), rest::binary>> = data
+    {header <> piece, rest}
+  end
+
+  defp parse_frame_header(
+         <<final::1, _reserved::3, opcode::4, _masked::1, payload_length::7, rest::binary>>,
+         data,
+         extended_bytes
+       ) do
+    payload_bytes =
+      case {payload_length, extended_bytes} do
+        {length, 0} -> length
+        {126, 2} -> :binary.decode_unsigned(binary_part(rest, 0, 2))
+        {127, 8} -> :binary.decode_unsigned(binary_part(rest, 0, 8))
+      end
+
+    {:ok, opcode, final == 1, payload_bytes, data}
+  end
+
+  defp fragment_state(opcode, final?, message_bytes, prior_fragment_bytes) do
+    cond do
+      opcode in [1, 2] and not final? -> {message_bytes, false}
+      opcode == 0 and not final? -> {message_bytes, false}
+      opcode == 0 and final? -> {message_bytes, true}
+      opcode in [1, 2] -> {0, false}
+      true -> {prior_fragment_bytes, false}
+    end
+  end
+
+  defp oversized_decoded_message?(frames, limit) do
+    Enum.any?(frames, fn
+      {:text, bytes} when is_binary(bytes) -> byte_size(bytes) > limit
+      {:binary, bytes} when is_binary(bytes) -> byte_size(bytes) > limit
+      _other -> false
+    end)
   end
 
   defp dispatch_frames(frames, state) do
