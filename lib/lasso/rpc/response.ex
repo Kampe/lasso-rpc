@@ -95,6 +95,15 @@ defmodule Lasso.RPC.Response.Success do
       do: UpstreamAdmission.release(lease, reason)
 
   def release_capacity(%__MODULE__{}, _reason), do: :ok
+
+  @doc "Runs a response consumer while retaining its upstream response capacity."
+  @spec consume_capacity(t(), atom(), (t() -> result)) :: result when result: var
+  def consume_capacity(%__MODULE__{} = response, reason, consumer)
+      when is_atom(reason) and is_function(consumer, 1) do
+    consumer.(response)
+  after
+    release_capacity(response, reason)
+  end
 end
 
 defmodule Lasso.RPC.Response.Error do

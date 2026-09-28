@@ -4,6 +4,7 @@ defmodule Lasso.Core.Support.GapFiller do
   """
 
   alias Lasso.Core.Request.ExecutionScope
+  alias Lasso.JSONRPC.Quantity
   alias Lasso.RPC.{RequestOptions, RequestPipeline, Response}
 
   defmodule Plan do
@@ -79,7 +80,7 @@ defmodule Lasso.Core.Support.GapFiller do
   def ensure_blocks(%Plan{} = plan, from_n, to_n) when from_n <= to_n do
     result =
       Enum.reduce_while(from_n..to_n, {:ok, []}, fn block_number, {:ok, blocks} ->
-        params = ["0x" <> Integer.to_string(block_number, 16), false]
+        params = [Quantity.encode(block_number), false]
 
         case request(plan, "eth_getBlockByNumber", params) do
           {:ok, %{"number" => _} = block} -> {:cont, {:ok, [block | blocks]}}
@@ -117,8 +118,8 @@ defmodule Lasso.Core.Support.GapFiller do
   def ensure_logs(%Plan{} = plan, filter, from_n, to_n) when from_n <= to_n do
     full_filter =
       Map.merge(filter, %{
-        "fromBlock" => "0x" <> Integer.to_string(from_n, 16),
-        "toBlock" => "0x" <> Integer.to_string(to_n, 16)
+        "fromBlock" => Quantity.encode(from_n),
+        "toBlock" => Quantity.encode(to_n)
       })
 
     case request(plan, "eth_getLogs", [full_filter]) do
@@ -161,10 +162,21 @@ defmodule Lasso.Core.Support.GapFiller do
       }
 
       case plan.requester.(scope, plan.chain_id, method, params, opts) do
-        {:ok, %Response.Success{} = response, _ctx} -> Response.Success.decode_result(response)
-        {:ok, result, _ctx} -> {:ok, result}
-        {:error, reason, _ctx} -> {:error, reason}
-        other -> {:error, {:unexpected_request_result, other}}
+        {:ok, %Response.Success{} = response, _ctx} ->
+          Response.Success.consume_capacity(
+            response,
+            :backfill_consumed,
+            &Response.Success.decode_result/1
+          )
+
+        {:ok, result, _ctx} ->
+          {:ok, result}
+
+        {:error, reason, _ctx} ->
+          {:error, reason}
+
+        other ->
+          {:error, {:unexpected_request_result, other}}
       end
     end
   end
@@ -187,11 +199,23 @@ defmodule Lasso.Core.Support.GapFiller do
     )
   end
 
-  defp decode_block_number("0x" <> hex), do: {:ok, String.to_integer(hex, 16)}
+  defp decode_block_number(value) when is_binary(value) do
+    case Quantity.decode(value) do
+      {:ok, decoded} -> {:ok, decoded}
+      {:error, :invalid_quantity} -> {:error, {:invalid_block_number, value}}
+    end
+  end
+
   defp decode_block_number(number) when is_integer(number) and number >= 0, do: {:ok, number}
   defp decode_block_number(other), do: {:error, {:invalid_block_number, other}}
 
   defp decode_hex(nil), do: nil
-  defp decode_hex("0x" <> rest), do: String.to_integer(rest, 16)
   defp decode_hex(num) when is_integer(num), do: num
+
+  defp decode_hex(value) do
+    case Quantity.decode(value) do
+      {:ok, decoded} -> decoded
+      {:error, :invalid_quantity} -> nil
+    end
+  end
 end

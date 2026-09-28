@@ -163,8 +163,8 @@ defmodule Lasso.Core.Streaming.StreamCoordinatorBackgroundOwnerTest do
     requester = fn _scope, _chain_id, method, params, _opts ->
       case {method, params} do
         {"eth_blockNumber", []} -> {:ok, "0xb", %{}}
-        {"eth_getBlockByNumber", ["0xA", false]} -> {:ok, new_head(10), %{}}
-        {"eth_getBlockByNumber", ["0xB", false]} -> {:ok, new_head(11), %{}}
+        {"eth_getBlockByNumber", ["0xa", false]} -> {:ok, new_head(10), %{}}
+        {"eth_getBlockByNumber", ["0xb", false]} -> {:ok, new_head(11), %{}}
       end
     end
 
@@ -397,13 +397,13 @@ defmodule Lasso.Core.Streaming.StreamCoordinatorBackgroundOwnerTest do
         {"eth_blockNumber", []} ->
           {:ok, "0xc", %{}}
 
-        {"eth_getBlockByNumber", ["0xA", false]} ->
+        {"eth_getBlockByNumber", ["0xa", false]} ->
           {:ok, new_head(10), %{}}
 
-        {"eth_getBlockByNumber", ["0xB", false]} ->
+        {"eth_getBlockByNumber", ["0xb", false]} ->
           {:ok, new_head(11), %{}}
 
-        {"eth_getBlockByNumber", ["0xC", false]} ->
+        {"eth_getBlockByNumber", ["0xc", false]} ->
           send(test_pid, {:last_request_blocked, self()})
 
           receive do
@@ -428,13 +428,13 @@ defmodule Lasso.Core.Streaming.StreamCoordinatorBackgroundOwnerTest do
                     head_opts}
 
     assert_receive {:backfill_request, ^owner_pid, replay_scope, ^chain_id,
-                    "eth_getBlockByNumber", ["0xA", false], replay_opts}
+                    "eth_getBlockByNumber", ["0xa", false], replay_opts}
 
     assert_receive {:backfill_request, ^owner_pid, block_scope, ^chain_id, "eth_getBlockByNumber",
-                    ["0xB", false], block_opts}
+                    ["0xb", false], block_opts}
 
     assert_receive {:backfill_request, ^owner_pid, final_scope, ^chain_id, "eth_getBlockByNumber",
-                    ["0xC", false], final_opts}
+                    ["0xc", false], final_opts}
 
     assert_receive {:last_request_blocked, ^owner_pid}
 
@@ -1640,7 +1640,7 @@ defmodule Lasso.Core.Streaming.StreamCoordinatorBackgroundOwnerTest do
 
       case {method, params} do
         {"eth_blockNumber", []} -> {:ok, "0xc", %{}}
-        {"eth_getBlockByNumber", ["0xA", false]} -> {:error, :upstream_failed, %{}}
+        {"eth_getBlockByNumber", ["0xa", false]} -> {:error, :upstream_failed, %{}}
         {"eth_getBlockByNumber", [_number, false]} -> flunk("request after terminal error")
       end
     end
@@ -1656,8 +1656,8 @@ defmodule Lasso.Core.Streaming.StreamCoordinatorBackgroundOwnerTest do
     GenServer.cast(pid, {:provider_unhealthy, "ws-old", "ws-new"})
 
     assert_receive {:attempted_request, "eth_blockNumber", []}
-    assert_receive {:attempted_request, "eth_getBlockByNumber", ["0xA", false]}
-    refute_receive {:attempted_request, "eth_getBlockByNumber", ["0xB", false]}, 0
+    assert_receive {:attempted_request, "eth_getBlockByNumber", ["0xa", false]}
+    refute_receive {:attempted_request, "eth_getBlockByNumber", ["0xb", false]}, 0
 
     assert await_state(pid, &(&1.failover_status == :degraded)).failover_context == nil
     assert Process.alive?(pid)
