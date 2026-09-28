@@ -194,12 +194,25 @@ defmodule Lasso.RPC.TransportRegistry do
 
     case :ets.lookup(@channel_cache_table, cache_key) do
       [{^cache_key, channel}] ->
-        if route_identity_matches?(channel, opts),
-          do: {:ok, bind_route_context(channel, opts)},
-          else: do_get_channel(profile, chain_id, provider_id, transport, opts)
+        if route_identity_matches?(channel, opts) and
+             reusable_after_pending_cleanup?(profile, chain_id, provider_id, channel),
+           do: {:ok, bind_route_context(channel, opts)},
+           else: do_get_channel(profile, chain_id, provider_id, transport, opts)
 
       [] ->
         do_get_channel(profile, chain_id, provider_id, transport, opts)
+    end
+  end
+
+  defp reusable_after_pending_cleanup?(profile, chain_id, provider_id, channel) do
+    key = {profile, chain_id, provider_id}
+
+    case :ets.lookup(:lasso_runtime_provider_cleanup, key) do
+      [{^key, {_instance_id, removal_generation}}] ->
+        channel.route_generation > removal_generation
+
+      [] ->
+        true
     end
   end
 
@@ -344,12 +357,31 @@ defmodule Lasso.RPC.TransportRegistry do
     close_channel(@default_profile, chain_identifier, provider_id, transport)
   end
 
-  @spec close_channel_sync(profile, chain_id, provider_id, transport) :: :ok
+  @spec close_channel_sync(profile, chain_id, provider_id, transport) ::
+          :ok | {:error, {:channel_close_exit, term()}}
   def close_channel_sync(profile, chain_id, provider_id, transport)
       when is_binary(profile) and is_integer(chain_id) and chain_id > 0 do
-    GenServer.call(via_name(profile, chain_id), {:close_channel, provider_id, transport})
+    close_channel_sync(profile, chain_id, provider_id, transport, :infinity)
+  end
+
+  @spec close_channel_sync(
+          profile,
+          chain_id,
+          provider_id,
+          transport,
+          non_neg_integer() | :infinity
+        ) ::
+          :ok | {:error, {:channel_close_exit, term()}}
+  def close_channel_sync(profile, chain_id, provider_id, transport, max_generation)
+      when is_binary(profile) and is_integer(chain_id) and chain_id > 0 do
+    GenServer.call(
+      via_name(profile, chain_id),
+      {:close_channel, provider_id, transport, max_generation},
+      2_000
+    )
   catch
     :exit, {:noproc, _} -> :ok
+    :exit, reason -> {:error, {:channel_close_exit, reason}}
   end
 
   # GenServer implementation
@@ -386,7 +418,13 @@ defmodule Lasso.RPC.TransportRegistry do
   def handle_call({:get_channel, provider_id, transport, opts}, _from, state) do
     case get_existing_channel(state, provider_id, transport) do
       {:ok, channel} ->
-        if route_identity_matches?(channel, opts) and Channel.healthy?(channel) do
+        if route_identity_matches?(channel, opts) and Channel.healthy?(channel) and
+             reusable_after_pending_cleanup?(
+               state.profile,
+               state.chain_id,
+               provider_id,
+               channel
+             ) do
           {:reply, {:ok, bind_route_context(channel, opts)}, state}
         else
           new_state = remove_channel(state, provider_id, transport)
@@ -454,6 +492,27 @@ defmodule Lasso.RPC.TransportRegistry do
   @impl true
   def handle_call({:close_channel, provider_id, transport}, _from, state) do
     new_state = remove_channel(state, provider_id, transport)
+    {:reply, :ok, new_state}
+  end
+
+  def handle_call({:close_channel, provider_id, transport, max_generation}, _from, state) do
+    new_state =
+      case get_existing_or_cached_channel(state, provider_id, transport) do
+        {:ok, %Channel{}} when max_generation == :infinity ->
+          remove_channel(state, provider_id, transport)
+
+        {:ok, %Channel{route_generation: generation}}
+        when is_integer(generation) and is_integer(max_generation) and
+               generation <= max_generation ->
+          remove_channel(state, provider_id, transport)
+
+        {:ok, %Channel{route_generation: nil}} ->
+          remove_channel(state, provider_id, transport)
+
+        _ ->
+          state
+      end
+
     {:reply, :ok, new_state}
   end
 
@@ -525,6 +584,21 @@ defmodule Lasso.RPC.TransportRegistry do
     case get_in(state.channels, [provider_id, transport]) do
       nil -> {:error, :not_found}
       channel -> {:ok, channel}
+    end
+  end
+
+  defp get_existing_or_cached_channel(state, provider_id, transport) do
+    case get_existing_channel(state, provider_id, transport) do
+      {:ok, channel} ->
+        {:ok, channel}
+
+      {:error, :not_found} ->
+        key = {state.profile, state.chain_id, provider_id, transport}
+
+        case :ets.lookup(@channel_cache_table, key) do
+          [{^key, channel}] -> {:ok, channel}
+          [] -> {:error, :not_found}
+        end
     end
   end
 

@@ -585,6 +585,37 @@ defmodule Lasso.Core.Streaming.UpstreamSubscriptionPoolIntegrationTest do
     end
   end
 
+  test "old-instance removal event keeps an active replacement subscription", %{
+    chain: chain,
+    provider: provider,
+    profile: profile
+  } do
+    key = {:newHeads}
+    assert {:ok, _} = UpstreamSubscriptionPool.subscribe_client(profile, chain, self(), key)
+
+    Eventually.assert_eventually(fn -> get_pool_state(chain).keys[key].status == :active end)
+
+    current_instance = Lasso.Providers.Catalog.lookup_instance_id(profile, chain, provider)
+    removed_instance = "removed-#{current_instance}"
+    pool = GenServer.whereis(UpstreamSubscriptionPool.via(profile, chain))
+    :sys.suspend(pool)
+    on_exit(fn -> if Process.alive?(pool), do: :sys.resume(pool) end)
+
+    Lasso.Core.Streaming.InstanceEventBus.broadcast(
+      Lasso.Topics.instance_sub_manager_restarted(chain),
+      {:runtime_provider_removed, profile, provider, removed_instance}
+    )
+
+    Eventually.assert_eventually(fn ->
+      {:messages, messages} = Process.info(pool, :messages)
+      {:runtime_provider_removed, profile, provider, removed_instance} in messages
+    end)
+
+    :sys.resume(pool)
+    assert get_pool_state(chain).keys[key].status == :active
+    assert get_pool_state(chain).keys[key].instance_id == current_instance
+  end
+
   defp get_pool_state(profile \\ @default_profile, chain) do
     :sys.get_state(UpstreamSubscriptionPool.via(profile, chain))
   end
