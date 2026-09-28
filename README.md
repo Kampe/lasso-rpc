@@ -27,6 +27,11 @@ try it in one command. Add any EVM chain and your own providers in YAML.
 [How it works](#how-it-works) · [Migration guide](docs/MIGRATION.md) ·
 [Documentation](#documentation) · [Support](SUPPORT.md)
 
+## Managed Lasso 
+
+[lasso.sh](https://lasso.sh)
+[Setup with your agent](https://lasso.sh/llms.txt)
+
 ## Why Lasso
 
 Every RPC provider is a bundle of tradeoffs: latency, uptime, rate limits,
