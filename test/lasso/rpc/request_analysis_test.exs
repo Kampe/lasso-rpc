@@ -101,13 +101,13 @@ defmodule Lasso.RPC.RequestAnalysisTest do
       refute result.requires_archival
     end
 
-    test "does not infer archive age from an EIP-234 blockHash filter" do
+    test "requires archival capability for an EIP-234 blockHash filter of unknown age" do
       result =
         RequestAnalysis.analyze("eth_getLogs", [
           %{"blockHash" => "0x" <> String.duplicate("ab", 32)}
         ])
 
-      refute result.requires_archival
+      assert result.requires_archival
       assert is_nil(result.block_range)
     end
 
