@@ -53,6 +53,7 @@ defmodule Lasso.RPC.Selection.CandidateCursor do
                 candidate_labels: [],
                 preferred: [],
                 preferred_head_height: nil,
+                deadline_us: nil,
                 deferred_ranking: nil,
                 excluded_provider_ids: MapSet.new(),
                 returned: 0,
@@ -147,6 +148,7 @@ defmodule Lasso.RPC.Selection.CandidateCursor do
       preferred_head_height: Keyword.get(opts, :preferred_head_height),
       deferred_ranking: deferred_ranking,
       limit: limit,
+      deadline_us: Keyword.get(opts, :deadline_us),
       candidate_labels: candidate_labels,
       diversity_seen: diversity_seen(Keyword.get(opts, :strategy), method, opts)
     }
@@ -208,6 +210,7 @@ defmodule Lasso.RPC.Selection.CandidateCursor do
         prefer_heads(descriptors, Keyword.get(opts, :preferred_head_height), plan.chain_id),
       preferred_head_height: Keyword.get(opts, :preferred_head_height),
       limit: limit,
+      deadline_us: Keyword.get(opts, :deadline_us),
       candidate_labels: [],
       diversity_seen: diversity_seen(strategy, method, opts)
     }
@@ -526,7 +529,13 @@ defmodule Lasso.RPC.Selection.CandidateCursor do
   end
 
   defp channel(cursor, candidate, transport) do
-    TransportRegistry.get_channel_from_plan(cursor.plan, candidate, transport, cursor.method)
+    TransportRegistry.get_channel_from_plan(
+      cursor.plan,
+      candidate,
+      transport,
+      cursor.method,
+      cursor.deadline_us
+    )
   end
 
   defp tier(circuit_state, rate_limited, transport) do

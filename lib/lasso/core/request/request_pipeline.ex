@@ -351,7 +351,8 @@ defmodule Lasso.RPC.RequestPipeline do
             transport: opts.transport || :both,
             limit: @max_channel_candidates,
             params: params,
-            request_origin: opts.request_origin
+            request_origin: opts.request_origin,
+            deadline_us: ctx.execution_envelope.deadline_us
           ]
       )
     end
@@ -362,7 +363,10 @@ defmodule Lasso.RPC.RequestPipeline do
        ) do
     fn %RequestContext{chain_id: chain_id} = ctx ->
       {method, params} = HeadPolicy.selection_request(ctx)
-      primary_channels = get_provider_channels(profile, chain_id, provider_id, opts.transport)
+      deadline_us = ctx.execution_envelope.deadline_us
+
+      primary_channels =
+        get_provider_channels(profile, chain_id, provider_id, opts.transport, deadline_us)
 
       if opts.failover_on_override do
         failover_channels =
@@ -372,6 +376,7 @@ defmodule Lasso.RPC.RequestPipeline do
             exclude: [provider_id],
             request_origin: opts.request_origin,
             limit: @max_channel_candidates,
+            deadline_us: deadline_us,
             params: params
           )
 
@@ -1620,8 +1625,10 @@ defmodule Lasso.RPC.RequestPipeline do
     finalize_error(error, %{ctx | terminal_reason: :invalid_request})
   end
 
-  @spec get_provider_channels(String.t(), chain_id(), String.t(), atom() | nil) :: [Channel.t()]
-  defp get_provider_channels(profile, chain_id, provider_id, transport_override) do
+  @spec get_provider_channels(String.t(), chain_id(), String.t(), atom() | nil, integer()) :: [
+          Channel.t()
+        ]
+  defp get_provider_channels(profile, chain_id, provider_id, transport_override, deadline_us) do
     case active_catalog_provider(profile, chain_id, provider_id) do
       {:ok, snapshot, provider, instance} ->
         transports = if transport_override, do: [transport_override], else: [:http, :ws]
@@ -1631,6 +1638,7 @@ defmodule Lasso.RPC.RequestPipeline do
               channel =
                 fetch_channel_safe(profile, chain_id, provider_id, transport,
                   provider_config: instance,
+                  deadline_us: deadline_us,
                   instance_id: provider.instance_id,
                   route_generation: snapshot.generation
                 ),
