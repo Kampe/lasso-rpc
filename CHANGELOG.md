@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-28
+
+### Added
+
+- Add a route-readiness endpoint, node-local Prometheus metrics, JSON console logging, safe `check-config` and `reload` release commands, and authenticated Caddy/nginx deployment examples. Health still means process health; readiness and an upstream-backed RPC call provide separate evidence.
+- Expose profile-scoped, transport-qualified head observations and routing decisions. Bounded method-family evidence and opt-in exploration help select an eligible upstream without changing JSON-RPC request shapes.
+- Add a standalone provider discovery CLI with bounded method, limit, archive, and WebSocket probes. Quiet subscriptions are reported as accepted rather than proven supported; malformed responses and mismatched chain identities do not establish capability evidence.
+- Extend native AMD64 and ARM64 container acceptance to exercise operator endpoints, proxy configuration, reload, and optional publication-journal continuity.
+
+### Changed
+
+- Bound HTTP response retention, upstream dispatch, WebSocket frame/event ingress, subscription recovery buffers, and retry backfill within existing request and continuity budgets. Release response capacity when a successful upstream response is rejected or abandoned.
+- Discard an HTTP/1 checkout after a receive timeout so an unfinished response cannot be reused by a later request. This adds a lightweight linked task around each bounded HTTP dispatch while Finch's upstream timeout behavior remains unresolved.
+- Preserve distinct provider opportunities during replay-safe fallback, qualify head and archive evidence before routing, and retain final upstream error attribution. An oversized `eth_getLogs` range now returns a range-actionable error where the upstream identifies that constraint.
+- Surface sustained upstream credential failures in sanitized operator diagnostics. Reconcile provider removal and supervisor recovery without publishing stale channels, and keep WebSocket recovery tied to the current connection and configured replay horizon.
+
+### Security
+
+- Upgrade Mint to 1.11.0 and HPAX to 1.1.0 for the newly published HTTP framing and HTTP/2 fixes. Keep operator ingress authentication, request limits, and TLS at the network or reverse-proxy boundary; Core does not supply client identity or billing.
+
+### Compatibility
+
+- No required profile schema or publication-journal migration. Existing `off`, `local`, and optional `global` continuity modes remain; keep the existing journal and use the documented coordinated replacement procedure for enrolled global deployments.
+- Stricter JSON-RPC envelope, method-parameter, provider-capability, and discovery-response validation can reject malformed inputs that earlier versions forwarded or treated as evidence. Check custom profiles with `check-config` before reloading; a rejected reload retains the active configuration.
+- Prometheus counters and readiness are local to each node. Head observations are bounded evidence, not finality or proof of arbitrary RPC execution. Provider quotas, archive depth, subscription recovery, and sustained workload capacity still require qualification against the operator's upstreams.
+
 ## [0.4.5] - 2026-09-23
 
 ### Security
@@ -309,7 +335,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Credo and Dialyzer static analysis
 - Comprehensive test suite (unit + integration)
 
-[Unreleased]: https://github.com/jaxernst/lasso-rpc/compare/v0.4.5...HEAD
+[Unreleased]: https://github.com/jaxernst/lasso-rpc/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jaxernst/lasso-rpc/compare/v0.4.5...v0.5.0
 [0.4.5]: https://github.com/jaxernst/lasso-rpc/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/jaxernst/lasso-rpc/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/jaxernst/lasso-rpc/compare/v0.4.2...v0.4.3
