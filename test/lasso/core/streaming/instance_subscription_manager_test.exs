@@ -451,6 +451,41 @@ defmodule Lasso.Core.Streaming.InstanceSubscriptionManagerTest do
   end
 
   describe "subscription liveness monitoring" do
+    test "invalid newHeads frames do not dispatch or renew liveness", %{instance_id: instance_id} do
+      key = {:newHeads}
+      InstanceSubscriptionRegistry.register_consumer(instance_id, key)
+      assert {:ok, _} = InstanceSubscriptionManager.ensure_subscription(instance_id, key)
+
+      [{manager_pid, _}] = Registry.lookup(Lasso.Registry, {:instance_sub_manager, instance_id})
+      before = :sys.get_state(manager_pid).active_subscriptions[key]
+
+      send(
+        manager_pid,
+        {:subscription_event, instance_id, before.upstream_id, %{"number" => "invalid"},
+         System.monotonic_time(:millisecond)}
+      )
+
+      after_event = :sys.get_state(manager_pid).active_subscriptions[key]
+      assert after_event.last_event_at == before.last_event_at
+      assert after_event.staleness_timer_ref == before.staleness_timer_ref
+      refute_receive {:instance_subscription_event, ^instance_id, ^key, _, _}, 10
+    end
+
+    test "config update reschedules an established newHeads liveness timer", %{
+      instance_id: instance_id
+    } do
+      key = {:newHeads}
+      assert {:ok, _} = InstanceSubscriptionManager.ensure_subscription(instance_id, key)
+
+      [{manager_pid, _}] = Registry.lookup(Lasso.Registry, {:instance_sub_manager, instance_id})
+      before = :sys.get_state(manager_pid)
+      old_ref = before.active_subscriptions[key].staleness_timer_ref
+      send(manager_pid, :instance_config_updated)
+      after_update = :sys.get_state(manager_pid)
+
+      assert after_update.active_subscriptions[key].staleness_timer_ref != old_ref
+    end
+
     test "subscription with events is not marked stale", %{instance_id: instance_id} do
       key = {:newHeads}
 
@@ -515,6 +550,18 @@ defmodule Lasso.Core.Streaming.InstanceSubscriptionManagerTest do
 
       state = :sys.get_state(manager_pid)
       %{staleness_timer_ref: timer_ref} = state.active_subscriptions[key]
+
+      :sys.replace_state(manager_pid, fn state ->
+        update_in(state.active_subscriptions[key], fn info ->
+          %{
+            info
+            | event_received?: true,
+              last_event_at:
+                System.monotonic_time(:millisecond) -
+                  state.new_heads_staleness_threshold_ms - 1
+          }
+        end)
+      end)
 
       send(manager_pid, {:staleness_check, key, timer_ref})
       Process.sleep(50)

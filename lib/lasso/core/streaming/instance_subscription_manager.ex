@@ -26,6 +26,7 @@ defmodule Lasso.Core.Streaming.InstanceSubscriptionManager do
   alias Lasso.Config.ConfigStore
   alias Lasso.Core.Streaming.{InstanceEventBus, InstanceSubscriptionRegistry}
   alias Lasso.Events.Subscription
+  alias Lasso.Observations.HeadObservation
   alias Lasso.Providers.Catalog
   alias Lasso.RPC.Response
   alias Lasso.RPC.Transport.WebSocket.Connection
@@ -106,6 +107,7 @@ defmodule Lasso.Core.Streaming.InstanceSubscriptionManager do
   def init({chain_id, instance_id}) do
     InstanceEventBus.subscribe(Lasso.Topics.ws_subs_instance(instance_id))
     InstanceEventBus.subscribe(Lasso.Topics.ws_conn_instance(instance_id))
+    Phoenix.PubSub.subscribe(Lasso.PubSub, Lasso.Topics.instance_config_updated(instance_id))
 
     Process.send_after(self(), :cleanup_check, @cleanup_interval_ms)
 
@@ -218,19 +220,36 @@ defmodule Lasso.Core.Streaming.InstanceSubscriptionManager do
         {:noreply, %{state | orphan_event_count: orphan_count}}
 
       sub_key ->
-        case InstanceSubscriptionRegistry.dispatch(
-               state.instance_id,
-               sub_key,
-               {:instance_subscription_event, state.instance_id, sub_key, payload, received_at}
-             ) do
-          :ok ->
-            {:noreply, update_subscription_liveness(state, sub_key, received_at)}
+        if semantically_live_event?(state, sub_key, payload) do
+          case InstanceSubscriptionRegistry.dispatch(
+                 state.instance_id,
+                 sub_key,
+                 {:instance_subscription_event, state.instance_id, sub_key, payload, received_at}
+               ) do
+            :ok ->
+              {:noreply, update_subscription_liveness(state, sub_key, received_at)}
 
-          {:error, :ingress_exhausted} ->
-            Connection.close_for_ingress_overload(state.instance_id)
-            handle_disconnect(state)
+            {:error, :ingress_exhausted} ->
+              Connection.close_for_ingress_overload(state.instance_id)
+              handle_disconnect(state)
+          end
+        else
+          emit_telemetry(:invalid_event, state, sub_key)
+          {:noreply, state}
         end
     end
+  end
+
+  def handle_info(:instance_config_updated, state) do
+    state =
+      state
+      |> Map.put(
+        :new_heads_staleness_threshold_ms,
+        calculate_staleness_threshold(state.instance_id, state.chain_id)
+      )
+      |> reschedule_new_heads_staleness()
+
+    {:noreply, state}
   end
 
   def handle_info(:cleanup_check, state) do
@@ -447,7 +466,7 @@ defmodule Lasso.Core.Streaming.InstanceSubscriptionManager do
         now = System.monotonic_time(:millisecond)
 
         staleness_timer_ref =
-          schedule_staleness_check(state, sub_key, @new_subscription_grace_ms)
+          schedule_staleness_check(state, sub_key, first_event_threshold_ms(state))
 
         sub_info = %{
           upstream_id: upstream_id,
@@ -455,6 +474,7 @@ defmodule Lasso.Core.Streaming.InstanceSubscriptionManager do
           created_at: now,
           marked_for_teardown_at: nil,
           last_event_at: now,
+          event_received?: false,
           staleness_timer_ref: staleness_timer_ref
         }
 
@@ -585,16 +605,20 @@ defmodule Lasso.Core.Streaming.InstanceSubscriptionManager do
           Process.cancel_timer(sub_info.staleness_timer_ref)
         end
 
+        now = System.monotonic_time(:millisecond)
+        last_event_at = min(now, max(sub_info.last_event_at, received_at))
+
         new_timer_ref =
           schedule_staleness_check(
             state,
             sub_key,
-            state.new_heads_staleness_threshold_ms
+            max(0, state.new_heads_staleness_threshold_ms - (now - last_event_at))
           )
 
         updated_info = %{
           sub_info
-          | last_event_at: received_at,
+          | last_event_at: last_event_at,
+            event_received?: true,
             staleness_timer_ref: new_timer_ref
         }
 
@@ -608,12 +632,23 @@ defmodule Lasso.Core.Streaming.InstanceSubscriptionManager do
   defp handle_stale_subscription(state, sub_key, sub_info) do
     now = System.monotonic_time(:millisecond)
     stale_duration_ms = now - sub_info.last_event_at
+    threshold_ms = staleness_threshold_ms(state, sub_info)
 
+    if stale_duration_ms < threshold_ms do
+      timer_ref = schedule_staleness_check(state, sub_key, threshold_ms - stale_duration_ms)
+      updated = %{sub_info | staleness_timer_ref: timer_ref}
+      {:noreply, put_in(state.active_subscriptions[sub_key], updated)}
+    else
+      invalidate_stale_subscription(state, sub_key, sub_info, stale_duration_ms, threshold_ms)
+    end
+  end
+
+  defp invalidate_stale_subscription(state, sub_key, sub_info, stale_duration_ms, threshold_ms) do
     Logger.warning("Subscription stale - no events received",
       instance_id: state.instance_id,
       sub_key: inspect(sub_key),
       stale_duration_ms: stale_duration_ms,
-      threshold_ms: state.new_heads_staleness_threshold_ms,
+      threshold_ms: threshold_ms,
       upstream_id: sub_info.upstream_id
     )
 
@@ -643,6 +678,55 @@ defmodule Lasso.Core.Streaming.InstanceSubscriptionManager do
 
     {:noreply, %{state | active_subscriptions: new_subs, upstream_index: new_index}}
   end
+
+  defp semantically_live_event?(state, {:newHeads}, payload) when is_map(payload) do
+    match?(
+      {:ok, %HeadObservation{}},
+      HeadObservation.new_head(
+        state.chain_id,
+        state.instance_id,
+        payload,
+        System.system_time(:millisecond)
+      )
+    )
+  end
+
+  defp semantically_live_event?(_state, {:newHeads}, _payload), do: false
+  defp semantically_live_event?(_state, _sub_key, _payload), do: true
+
+  defp reschedule_new_heads_staleness(state) do
+    now = System.monotonic_time(:millisecond)
+
+    case Map.get(state.active_subscriptions, {:newHeads}) do
+      nil ->
+        state
+
+      %{marked_for_teardown_at: teardown_at} when not is_nil(teardown_at) ->
+        state
+
+      sub_info ->
+        if sub_info.staleness_timer_ref, do: Process.cancel_timer(sub_info.staleness_timer_ref)
+        threshold_ms = staleness_threshold_ms(state, sub_info)
+        elapsed_ms = max(0, now - sub_info.last_event_at)
+
+        timer_ref =
+          schedule_staleness_check(state, {:newHeads}, max(0, threshold_ms - elapsed_ms))
+
+        put_in(state.active_subscriptions[{:newHeads}], %{
+          sub_info
+          | staleness_timer_ref: timer_ref
+        })
+    end
+  end
+
+  defp staleness_threshold_ms(state, sub_info) do
+    if Map.get(sub_info, :event_received?, true),
+      do: state.new_heads_staleness_threshold_ms,
+      else: first_event_threshold_ms(state)
+  end
+
+  defp first_event_threshold_ms(state),
+    do: max(@new_subscription_grace_ms, state.new_heads_staleness_threshold_ms)
 
   defp broadcast_stale_to_profiles(state, sub_key, stale_duration_ms) do
     profiles = Catalog.get_instance_refs(state.instance_id)
