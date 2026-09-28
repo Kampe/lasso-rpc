@@ -415,6 +415,59 @@ defmodule Lasso.RPC.SelectionTest do
   end
 
   describe "compiled channel resolution" do
+    test "a stalled cold registry lookup ends at the request deadline", %{chain: chain} do
+      setup_providers([
+        %{id: "stalled_registry", priority: 10, behavior: :healthy, profile: "public"}
+      ])
+
+      :ets.delete(:transport_channel_cache, {"public", chain, "stalled_registry", :http})
+      registry = GenServer.whereis(TransportRegistry.via_name("public", chain))
+      assert is_pid(registry)
+      assert :ok = :sys.suspend(registry)
+
+      on_exit(fn ->
+        if Process.alive?(registry), do: :sys.resume(registry)
+      end)
+
+      started_ms = System.monotonic_time(:millisecond)
+      deadline_us = System.monotonic_time(:microsecond) + 30_000
+
+      assert {:error, :registry_timeout} =
+               TransportRegistry.get_channel("public", chain, "stalled_registry", :http,
+                 deadline_us: deadline_us
+               )
+
+      assert System.monotonic_time(:millisecond) - started_ms < 500
+    end
+
+    test "an expired request deadline cannot open a cold channel", %{chain: chain} do
+      setup_providers([
+        %{id: "deadline_provider", priority: 10, behavior: :healthy, profile: "public"}
+      ])
+
+      snapshot = Catalog.snapshot()
+      assert {:ok, plan} = Catalog.get_routing_plan(snapshot, "public", chain)
+      assert [candidate] = CandidateListing.list_routing_candidates_from_plan(plan, %{})
+
+      :ets.delete(:transport_channel_cache, {"public", chain, candidate.id, :http})
+      deadline_us = System.monotonic_time(:microsecond) - 1_000
+
+      assert [] ==
+               Selection.select_channels("public", chain, "eth_blockNumber",
+                 transport: :http,
+                 deadline_us: deadline_us
+               )
+
+      cursor =
+        Selection.select_channel_candidates("public", chain, "eth_blockNumber",
+          strategy: :priority,
+          transport: :http,
+          deadline_us: deadline_us
+        )
+
+      assert :done = CandidateCursor.next(cursor)
+    end
+
     test "uses the routing plan profile without reapplying mutable aliases", %{chain: chain} do
       setup_providers([
         %{id: "provider_1", priority: 10, behavior: :healthy, profile: "public"}

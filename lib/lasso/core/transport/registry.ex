@@ -166,7 +166,7 @@ defmodule Lasso.RPC.TransportRegistry do
   end
 
   @doc false
-  @spec get_channel_from_plan(RoutingPlan.t(), map(), transport(), binary()) ::
+  @spec get_channel_from_plan(RoutingPlan.t(), map(), transport(), binary(), integer() | nil) ::
           {:ok, Channel.t()} | {:error, term()}
   def get_channel_from_plan(
         %RoutingPlan{} = plan,
@@ -177,12 +177,14 @@ defmodule Lasso.RPC.TransportRegistry do
           route_generation: generation
         },
         transport,
-        method
+        method,
+        deadline_us \\ nil
       )
       when is_binary(provider_id) and is_binary(instance_id) and is_map(provider_config) and
              generation == plan.generation and transport in [:http, :ws] and is_binary(method) do
     get_canonical_channel(plan.profile, plan.chain_id, provider_id, transport,
       method: method,
+      deadline_us: deadline_us,
       provider_config: provider_config,
       instance_id: instance_id,
       route_generation: generation
@@ -217,10 +219,24 @@ defmodule Lasso.RPC.TransportRegistry do
   end
 
   defp do_get_channel(profile, chain_id, provider_id, transport, opts) do
-    GenServer.call(
-      canonical_via_name(profile, chain_id),
-      {:get_channel, provider_id, transport, opts}
-    )
+    timeout =
+      case Keyword.get(opts, :deadline_us) do
+        nil ->
+          5_000
+
+        deadline ->
+          min(5_000, max(div(deadline - System.monotonic_time(:microsecond) + 999, 1_000), 0))
+      end
+
+    if timeout == 0 do
+      {:error, :registry_timeout}
+    else
+      GenServer.call(
+        canonical_via_name(profile, chain_id),
+        {:get_channel, provider_id, transport, opts},
+        timeout
+      )
+    end
   catch
     :exit, {:noproc, _} -> {:error, :registry_unavailable}
     :exit, {:timeout, _} -> {:error, :registry_timeout}
@@ -802,6 +818,9 @@ defmodule Lasso.RPC.TransportRegistry do
   end
 
   defp remove_channel(state, provider_id, transport) do
+    # Lockless readers must stop acquiring the channel before it is closed.
+    uncache_channel(state, provider_id, transport)
+
     case get_existing_channel(state, provider_id, transport) do
       {:ok, channel} ->
         Channel.close(channel)
@@ -810,9 +829,6 @@ defmodule Lasso.RPC.TransportRegistry do
       {:error, :not_found} ->
         :ok
     end
-
-    # Remove from ETS cache (lockless reads will now miss)
-    uncache_channel(state, provider_id, transport)
 
     # Remove from GenServer state
     updated_channels =
