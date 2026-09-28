@@ -10,18 +10,13 @@ defmodule Lasso.Discovery.Probes.Limits do
   - Rate limiting behavior
   """
 
-  alias Lasso.Discovery.{ErrorClassifier, TestParams}
+  alias Lasso.Discovery.{ErrorClassifier, MethodEvidence, Response, TestParams}
+  alias Lasso.JSONRPC.Quantity
   alias Lasso.RPC.Transport.HTTP.Client.Finch, as: BoundedHTTP
 
-  @chain_archive_blocks %{
-    "ethereum" => 100,
-    "sepolia" => 100,
-    "arbitrum" => 5_000_000,
-    "optimism" => 5_000_000,
-    "base" => 5_000_000,
-    "polygon" => 1_000_000,
-    "bsc" => 1_000_000
-  }
+  @min_archive_depth 128_000
+  @block_range_tiers [10, 1_000, 10_000]
+  @widest_block_range_tier List.last(@block_range_tiers)
 
   @available_tests [
     :block_range,
@@ -53,7 +48,7 @@ defmodule Lasso.Discovery.Probes.Limits do
   ## Options
 
     * `:tests` - List of tests to run (default: all tests)
-    * `:chain` - Chain name for test contracts (default: "ethereum")
+    * `:chain` - Legacy label accepted for compatibility; archive depth uses the live head
     * `:timeout` - Request timeout in ms (default: 10000)
 
   ## Returns
@@ -62,7 +57,12 @@ defmodule Lasso.Discovery.Probes.Limits do
   """
   @spec probe(String.t(), keyword()) :: %{test_name() => test_result()}
   def probe(url, opts \\ []) do
-    tests = Keyword.get(opts, :tests, @available_tests)
+    default_tests =
+      if Keyword.get(opts, :user_initiated, false),
+        do: @available_tests -- [:rate_limit],
+        else: @available_tests
+
+    tests = Keyword.get(opts, :tests, default_tests)
     chain = Keyword.get(opts, :chain, "ethereum")
     timeout = Keyword.get(opts, :timeout, 10_000)
 
@@ -103,74 +103,33 @@ defmodule Lasso.Discovery.Probes.Limits do
     test_block_params(url, timeout)
   end
 
-  defp run_test(:archive_support, url, chain, _current_block, timeout) do
-    test_archive_support(url, chain, timeout)
+  defp run_test(:archive_support, url, _chain, current_block, timeout) do
+    test_archive_support(url, current_block, timeout)
   end
 
   defp run_test(:rate_limit, url, _chain, _current_block, timeout) do
     test_rate_limit(url, timeout)
   end
 
-  # Block range limit test using binary search
-  # Uses a fake address filter to minimize results and test true block range limits
-  # (not result-size limits)
+  # A range limit is reported only after a narrower tier succeeds and a wider
+  # tier receives a recognized range rejection. Empty or failed probes prove
+  # neither an unlimited range nor a specific ceiling.
   defp test_block_range(url, current_block, timeout) do
-    test_ranges = [100, 500, 1000, 2000, 5000, 10_000, 25_000, 50_000, 100_000]
-
-    # Find first failure
-    first_failure =
-      Enum.find(test_ranges, fn range ->
-        from_block = current_block - range
-        to_block = current_block - 1
-
-        params = [
-          %{
-            "fromBlock" => TestParams.int_to_hex(from_block),
-            "toBlock" => TestParams.int_to_hex(to_block),
-            # Use fake address to minimize results and test block range limits
-            # (not result-size limits which trigger on high log counts)
-            "address" => "0x0000000000000000000000000000000000000001"
-          }
-        ]
-
-        case make_request(url, "eth_getLogs", params, timeout) do
-          {:ok, %{"result" => _}} -> false
-          {:ok, %{"error" => error}} -> ErrorClassifier.block_range_error?(error)
-          _ -> false
-        end
-      end)
-
-    case first_failure do
-      nil ->
-        %{
-          status: :unlimited,
-          value: nil,
-          recommendation: "No block range limit detected (tested up to 100000)"
-        }
-
-      limit ->
-        # Refine with binary search
-        prev_idx = Enum.find_index(test_ranges, &(&1 == limit)) - 1
-        lower = if prev_idx >= 0, do: Enum.at(test_ranges, prev_idx), else: 0
-        refined = binary_search_block_range(url, current_block, lower, limit, timeout)
-
-        %{
-          status: :limited,
-          value: refined,
-          recommendation: "Set capabilities.limits.max_block_range: #{refined}"
-        }
-    end
+    @block_range_tiers
+    |> Enum.filter(&(&1 <= current_block - 1))
+    |> Enum.reduce_while({:none, nil}, fn tier, {_outcome, last_success} ->
+      case probe_block_range_tier(url, current_block, tier, timeout) do
+        :ok -> {:cont, {:ok, tier}}
+        {:rejected, error} -> {:halt, {range_failure(error), last_success}}
+        :transient -> {:halt, {:inconclusive, last_success}}
+      end
+    end)
+    |> block_range_result()
   end
 
-  defp binary_search_block_range(_url, _current_block, lower, upper, _timeout)
-       when upper - lower <= 10 do
-    lower
-  end
-
-  defp binary_search_block_range(url, current_block, lower, upper, timeout) do
-    mid = div(lower + upper, 2)
-    from_block = current_block - mid
-    to_block = current_block - 1
+  defp probe_block_range_tier(url, current_block, tier, timeout) do
+    to_block = max(current_block - 1, 0)
+    from_block = max(to_block - tier, 0)
 
     params = [
       %{
@@ -181,19 +140,48 @@ defmodule Lasso.Discovery.Probes.Limits do
     ]
 
     case make_request(url, "eth_getLogs", params, timeout) do
-      {:ok, %{"result" => _}} ->
-        binary_search_block_range(url, current_block, mid, upper, timeout)
+      {:ok, %{"result" => value}} ->
+        if MethodEvidence.classify("eth_getLogs", value) == :supported,
+          do: :ok,
+          else: :transient
 
       {:ok, %{"error" => error}} ->
-        if ErrorClassifier.block_range_error?(error) do
-          binary_search_block_range(url, current_block, lower, mid, timeout)
-        else
-          mid
-        end
+        {:rejected, error}
 
       _ ->
-        mid
+        :transient
     end
+  end
+
+  defp range_failure(error) do
+    case ErrorClassifier.classify(error) do
+      {:block_range, _} -> :too_wide
+      _ -> :inconclusive
+    end
+  end
+
+  defp block_range_result({:ok, tier}) when tier >= @widest_block_range_tier do
+    %{
+      status: :unlimited,
+      value: nil,
+      recommendation: "No block range limit detected (verified to #{tier})"
+    }
+  end
+
+  defp block_range_result({:too_wide, last_success}) when is_integer(last_success) do
+    %{
+      status: :limited,
+      value: last_success,
+      recommendation: "Set capabilities.limits.max_block_range: #{last_success}"
+    }
+  end
+
+  defp block_range_result(_) do
+    %{
+      status: :inconclusive,
+      value: nil,
+      recommendation: "Could not determine block range limit"
+    }
   end
 
   # Address count limit test
@@ -343,72 +331,133 @@ defmodule Lasso.Discovery.Probes.Limits do
     }
   end
 
-  defp test_archive_support(url, chain, timeout) do
-    block_num = Map.get(@chain_archive_blocks, chain, 100)
-    old_block = TestParams.int_to_hex(block_num)
+  defp test_archive_support(_url, nil, _timeout) do
+    %{
+      status: :inconclusive,
+      value: nil,
+      recommendation: "Could not read chain height, so archive depth is unknown"
+    }
+  end
 
-    case make_request(url, "eth_getBlockByNumber", [old_block, false], timeout) do
-      {:ok, %{"result" => block}} when is_map(block) ->
-        # Block exists, test state query
-        state_result =
-          make_request(url, "eth_getBalance", [TestParams.zero_address(), old_block], timeout)
+  defp test_archive_support(_url, current_block, _timeout)
+       when current_block <= @min_archive_depth do
+    %{
+      status: :inconclusive,
+      value: nil,
+      recommendation: "Chain is too young to establish archive retention depth"
+    }
+  end
 
-        # Test historical logs query (critical for indexers)
-        logs_result =
-          make_request(
-            url,
-            "eth_getLogs",
-            [
-              %{
-                "fromBlock" => old_block,
-                "toBlock" => old_block,
-                "address" => "0x0000000000000000000000000000000000000001"
-              }
-            ],
-            timeout
-          )
+  defp test_archive_support(url, current_block, timeout) do
+    midpoint = div(current_block, 2)
+    floor_block = max(current_block - @min_archive_depth, 1)
+    deep_block = midpoint |> min(floor_block) |> max(1)
 
-        case {state_result, logs_result} do
-          # Full archive: both state and logs work
-          {{:ok, %{"result" => _}}, {:ok, %{"result" => logs}}} when is_list(logs) ->
-            %{
-              status: :supported,
-              value: :full_archive,
-              recommendation: "Full archive node support"
-            }
-
-          # Partial archive: blocks work but state or logs don't
-          _ ->
-            logs_work = match?({:ok, %{"result" => logs}} when is_list(logs), logs_result)
-            state_work = match?({:ok, %{"result" => _}}, state_result)
-
-            details =
-              cond do
-                state_work and not logs_work -> "Archive state but not historical logs"
-                not state_work and logs_work -> "Historical logs but not archive state"
-                true -> "Archive blocks only (no state or logs)"
-              end
-
-            %{
-              status: :supported,
-              value: :partial_archive,
-              recommendation: details
-            }
-        end
-
-      {:ok, %{"result" => nil}} ->
-        %{status: :not_supported, value: :non_archive, recommendation: "Not an archive node"}
-
-      {:ok, %{"error" => _}} ->
-        %{status: :not_supported, value: :non_archive, recommendation: "Not an archive node"}
-
-      _ ->
+    case probe_state_retention(url, deep_block, timeout) do
+      :unknown ->
         %{
           status: :inconclusive,
           value: nil,
-          recommendation: "Could not determine archive support"
+          recommendation: "Provider did not answer a current-state read; archive depth unknown"
         }
+
+      state ->
+        classify_archive(state, probe_log_retention(url, deep_block, timeout), deep_block)
     end
+  end
+
+  defp probe_state_retention(url, deep_block, timeout) do
+    if state_readable?(url, "latest", timeout) do
+      deep = TestParams.int_to_hex(deep_block)
+
+      case make_request(url, "eth_getBalance", [TestParams.zero_address(), deep], timeout) do
+        {:ok, %{"result" => value}} ->
+          if MethodEvidence.quantity?(value), do: :retained, else: :unknown
+
+        {:ok, %{"error" => error}} ->
+          depth_failure(error)
+
+        _ ->
+          :unknown
+      end
+    else
+      :unknown
+    end
+  end
+
+  defp state_readable?(url, block, timeout) do
+    case make_request(url, "eth_getBalance", [TestParams.zero_address(), block], timeout) do
+      {:ok, %{"result" => value}} -> MethodEvidence.quantity?(value)
+      _ -> false
+    end
+  end
+
+  defp probe_log_retention(url, deep_block, timeout) do
+    params = [
+      %{
+        "fromBlock" => TestParams.int_to_hex(deep_block),
+        "toBlock" => TestParams.int_to_hex(deep_block + 10),
+        "topics" => [TestParams.transfer_topic()]
+      }
+    ]
+
+    case make_request(url, "eth_getLogs", params, timeout) do
+      {:ok, %{"result" => [_ | _] = logs}} ->
+        if MethodEvidence.classify("eth_getLogs", logs) == :supported,
+          do: :retained,
+          else: :unknown
+
+      {:ok, %{"error" => error}} ->
+        depth_failure(error)
+
+      _ ->
+        :unknown
+    end
+  end
+
+  defp depth_failure(error) do
+    case ErrorClassifier.classify(error) do
+      {:state_unavailable, _} -> :pruned
+      _ -> :unknown
+    end
+  end
+
+  defp classify_archive(:retained, :retained, depth) do
+    %{
+      status: :supported,
+      value: :full_archive,
+      observed_state_block: depth,
+      observed_log_block: depth,
+      recommendation: "Serves archive state and logs at block #{depth}"
+    }
+  end
+
+  defp classify_archive(:retained, _logs, depth) do
+    %{
+      status: :supported,
+      value: :archive_state_only,
+      observed_state_block: depth,
+      recommendation: "Serves archive state at block #{depth}; log retention unconfirmed"
+    }
+  end
+
+  defp classify_archive(:pruned, :retained, depth) do
+    %{
+      status: :supported,
+      value: :archive_logs_only,
+      observed_log_block: depth,
+      unavailable_state_block: depth,
+      recommendation: "Serves logs at block #{depth}; state at that block is unavailable"
+    }
+  end
+
+  defp classify_archive(:pruned, _logs, depth) do
+    %{
+      status: :not_supported,
+      value: :non_archive,
+      unavailable_state_block: depth,
+      recommendation: "State at block #{depth} has been pruned"
+    }
   end
 
   # Rate limit detection test
@@ -485,46 +534,29 @@ defmodule Lasso.Discovery.Probes.Limits do
   # Helper: Get current block number
   defp get_current_block(url, timeout) do
     case make_request(url, "eth_blockNumber", [], timeout) do
-      {:ok, %{"result" => hex}} -> TestParams.hex_to_int(hex)
-      _ -> nil
+      {:ok, %{"result" => hex}} ->
+        case Quantity.decode(hex) do
+          {:ok, height} -> height
+          _ -> nil
+        end
+
+      _ ->
+        nil
     end
   end
 
-  # Helper: Make JSON-RPC request using Lasso's Finch pool
+  # Reject malformed envelopes and mismatched IDs before recording probe evidence.
   defp make_request(url, method, params, timeout) do
-    request_body = %{
-      jsonrpc: "2.0",
-      method: method,
-      params: params,
-      id: 1
-    }
+    case Response.request_decoded(%{url: url}, method, params, timeout: timeout) do
+      {:error, {:rate_limit, payload}} ->
+        {:rate_limited, try_decode_body(Map.get(payload, :body, ""))}
 
-    body = Jason.encode!(request_body)
+      {:error, {:server_error, payload}} ->
+        {:server_error, Map.get(payload, :status, :unavailable)}
 
-    request =
-      Finch.build(
-        :post,
-        url,
-        [{"content-type", "application/json"}],
-        body
-      )
-
-    BoundedHTTP.bounded_request(request, [receive_timeout: timeout], fn
-      {:ok, %{status: 200, body: response_body}} ->
-        Jason.decode(response_body)
-
-      {:ok, %{status: 429, body: body}} ->
-        {:rate_limited, try_decode_body(body)}
-
-      {:ok, %{status: status}} when status >= 500 ->
-        {:server_error, status}
-
-      {:ok, %{status: status}} ->
-        {:error, "HTTP #{status}"}
-
-      {:error, reason} ->
-        {:error, reason}
-    end)
+      other ->
+        other
+    end
   rescue
     e -> {:error, e}
   end

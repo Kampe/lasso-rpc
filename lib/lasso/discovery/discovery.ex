@@ -13,8 +13,7 @@ defmodule Lasso.Discovery do
       # Selective probing
       Lasso.Discovery.probe("https://eth.example.com",
         probes: [:methods, :limits],
-        method_level: :standard,
-        chain: "ethereum"
+        method_level: :standard
       )
 
       # WebSocket-only probe
@@ -31,6 +30,8 @@ defmodule Lasso.Discovery do
   """
 
   alias Lasso.Discovery.Probes.{Limits, MethodSupport, WebSocket}
+  alias Lasso.Discovery.Response
+  alias Lasso.JSONRPC.Quantity
 
   @available_probes [:methods, :limits, :websocket]
 
@@ -50,7 +51,7 @@ defmodule Lasso.Discovery do
 
     * `:probes` - List of probes to run (default: all)
     * `:timeout` - Request timeout in ms (default: 10000)
-    * `:chain` - Chain name for test contracts (default: "ethereum")
+    * `:chain` - Legacy label accepted for compatibility; archive depth uses the live head
     * `:method_level` - Method probe level: :critical, :standard, :full (default: :standard)
     * `:concurrent` - Max concurrent requests (default: 5)
     * `:subscription_wait` - Time to wait for WS subscription events (default: 15000)
@@ -108,15 +109,29 @@ defmodule Lasso.Discovery do
   """
   @spec probe_limits(String.t(), keyword()) :: map()
   def probe_limits(url, opts \\ []) do
-    chain = Keyword.get(opts, :chain, "ethereum")
     timeout = Keyword.get(opts, :timeout, 10_000)
-    tests = Keyword.get(opts, :tests, Limits.available_tests())
 
-    Limits.probe(url,
-      chain: chain,
-      timeout: timeout,
-      tests: tests
-    )
+    case Response.request_decoded(%{url: ensure_http_url(url)}, "eth_chainId", [],
+           timeout: timeout
+         ) do
+      {:ok, %{"result" => value}} ->
+        case Quantity.decode(value) do
+          {:ok, chain_id} when chain_id > 0 -> Limits.probe(ensure_http_url(url), opts)
+          _ -> identity_error()
+        end
+
+      _ ->
+        identity_error()
+    end
+  end
+
+  defp identity_error do
+    %{
+      identity: %{
+        status: :error,
+        recommendation: "Chain identity unavailable; limit probes were not run"
+      }
+    }
   end
 
   @doc """
@@ -202,12 +217,7 @@ defmodule Lasso.Discovery do
   end
 
   defp run_probe(:limits, url, opts) do
-    # Limits probe requires HTTP URL
-    http_url = ensure_http_url(url)
-    chain = Keyword.get(opts, :chain, "ethereum")
-    timeout = Keyword.get(opts, :timeout, 10_000)
-
-    Limits.probe(http_url, chain: chain, timeout: timeout)
+    probe_limits(url, opts)
   end
 
   defp run_probe(:websocket, url, opts) do
@@ -241,6 +251,10 @@ defmodule Lasso.Discovery do
         Map.put(config, :archive_node, true)
 
       %{status: :supported, value: :partial_archive} ->
+        Map.put(config, :archive_node, :partial)
+
+      %{status: :supported, value: value}
+      when value in [:archive_state_only, :archive_logs_only] ->
         Map.put(config, :archive_node, :partial)
 
       _ ->
