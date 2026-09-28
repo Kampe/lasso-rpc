@@ -1,62 +1,100 @@
 defmodule Lasso.Cluster.HealthTopology do
   @moduledoc """
-  Cluster-topology data for the health endpoint, with a local-node fallback
-  when cluster discovery is unavailable.
+  Shared cluster-topology helpers for the health endpoint.
+
+  Readiness reads the last node-local publication. Missing or stale cluster
+  diagnostics do not require a call to the topology worker.
   """
 
   @type info :: %{
           enabled: boolean(),
           coverage: %{
-            connected: pos_integer(),
-            responding: pos_integer(),
+            connected: non_neg_integer(),
+            responding: non_neg_integer(),
             expected: pos_integer()
           },
-          regions: [String.t()]
+          regions: [String.t()],
+          snapshot_status: :current | :stale | :unavailable | :standalone,
+          snapshot_age_ms: non_neg_integer() | nil
         }
 
+  @max_snapshot_age_ms 5_000
+
   @doc """
-  Returns topology info for the running cluster, falling back to a
-  standalone shape when the topology GenServer is unavailable or returns
-  an unexpected map.
+  Returns cached topology diagnostics, retaining missing configured peers
+  when the worker has not published usable state.
   """
   @spec get() :: info()
   def get do
-    topology = Lasso.Cluster.Topology.get_topology()
-    self_node_id = topology.self_node_id
-    node_ids = [self_node_id | topology.node_ids] |> Enum.uniq()
+    case Lasso.Cluster.Topology.health_snapshot() do
+      {:ok, topology, age_ms} ->
+        node_ids = [topology.self_node_id | topology.node_ids] |> Enum.uniq()
 
-    %{
-      enabled: true,
-      coverage: topology.coverage,
-      regions: extract_regions(node_ids)
-    }
-  rescue
-    _ -> standalone()
-  catch
-    :exit, _ -> standalone()
+        %{
+          enabled: true,
+          coverage:
+            Map.put(topology.coverage, :expected, expected_nodes(topology.coverage.connected)),
+          regions: extract_regions(node_ids),
+          snapshot_status: if(age_ms <= @max_snapshot_age_ms, do: :current, else: :stale),
+          snapshot_age_ms: age_ms
+        }
+
+      :unavailable ->
+        unavailable()
+    end
   end
 
   @doc """
-  Topology shape used when clustering is unavailable or unreachable.
+  Topology shape used when clustering is not configured and no snapshot exists.
   """
   @spec standalone() :: info()
   def standalone do
-    %{enabled: false, coverage: %{connected: 1, responding: 1, expected: 1}, regions: []}
+    %{
+      enabled: false,
+      coverage: %{connected: 1, responding: 1, expected: 1},
+      regions: [],
+      snapshot_status: :standalone,
+      snapshot_age_ms: nil
+    }
   end
 
   @doc """
   Maps a topology to a high-level status string for liveness/readiness
   checks. `"standalone"` when clustering is off, otherwise based on the
-  ratio of responding to connected nodes.
+  ratio of responding to expected nodes.
   """
   @spec cluster_status(info()) :: String.t()
   def cluster_status(%{enabled: false}), do: "standalone"
+  def cluster_status(%{snapshot_status: :unavailable}), do: "unavailable"
+  def cluster_status(%{snapshot_status: :stale}), do: "stale"
 
-  def cluster_status(%{coverage: %{responding: responding, connected: connected}}) do
+  def cluster_status(%{coverage: %{responding: responding, expected: expected}}) do
     cond do
-      responding >= connected -> "healthy"
-      responding >= div(connected, 2) -> "degraded"
+      responding >= expected -> "healthy"
+      responding >= div(expected + 1, 2) -> "degraded"
       true -> "critical"
+    end
+  end
+
+  defp unavailable do
+    if expected_nodes(1) > 1 or Node.alive?() or
+         Application.get_env(:libcluster, :topologies, []) != [] do
+      %{
+        enabled: true,
+        coverage: %{connected: 1, responding: 1, expected: expected_nodes(1)},
+        regions: [],
+        snapshot_status: :unavailable,
+        snapshot_age_ms: nil
+      }
+    else
+      standalone()
+    end
+  end
+
+  defp expected_nodes(connected) do
+    case Application.get_env(:lasso, :expected_cluster_nodes) do
+      desired when is_integer(desired) and desired > 0 -> max(connected, desired)
+      _ -> connected
     end
   end
 
