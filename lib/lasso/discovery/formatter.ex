@@ -105,6 +105,9 @@ defmodule Lasso.Discovery.Formatter do
 
   defp format_methods_section(nil), do: nil
 
+  defp format_methods_section({:aborted, reason}),
+    do: "Method probing stopped: #{reason}"
+
   defp format_methods_section(methods) when is_list(methods) do
     by_status = MethodSupport.count_by_status(methods)
     by_category = MethodSupport.group_by_category(methods)
@@ -422,6 +425,9 @@ defmodule Lasso.Discovery.Formatter do
       other -> other
     end)
     |> Map.update(:methods, nil, fn
+      {:aborted, reason} ->
+        %{status: "aborted", reason: Atom.to_string(reason)}
+
       methods when is_list(methods) ->
         Enum.map(methods, fn m ->
           m

@@ -22,9 +22,11 @@ defmodule Lasso.RPC.Providers.Capabilities do
   @valid_error_categories [
     :rate_limit,
     :capability_violation,
+    :block_not_available,
     :server_error,
     :requires_archival,
     :auth_error,
+    :timeout,
     :network_error,
     :client_error,
     :invalid_params,
@@ -132,6 +134,10 @@ defmodule Lasso.RPC.Providers.Capabilities do
     validate_error_rules!(provider_id, capabilities)
     validate_limits!(provider_id, capabilities)
     :ok
+  end
+
+  def validate!(provider_id, capabilities) do
+    raise "Provider #{inspect(provider_id)}: capabilities must be a map or null, got: #{inspect(capabilities)}"
   end
 
   # --- Private ---

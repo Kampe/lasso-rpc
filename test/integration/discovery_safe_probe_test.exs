@@ -4,6 +4,8 @@ defmodule Lasso.Integration.DiscoverySafeProbeTest do
   @moduletag :integration
 
   alias Lasso.Discovery.Probes.MethodSupport
+  alias Lasso.Discovery
+  alias Lasso.Discovery.Formatter
 
   defmodule Upstream do
     import Plug.Conn
@@ -15,13 +17,21 @@ defmodule Lasso.Integration.DiscoverySafeProbeTest do
       request = Jason.decode!(body)
       send(opts[:observer], {:probe_request, request["method"], request["params"]})
 
+      {status, message} =
+        case opts[:mode] do
+          :auth -> {401, "Unauthorized"}
+          :quota -> {402, "Payment required: credits exhausted"}
+          :rate_limit -> {429, "Too many requests"}
+          _ -> {200, "Method is not available"}
+        end
+
       response = %{
         "jsonrpc" => "2.0",
         "id" => request["id"],
-        "error" => %{"code" => -32_000, "message" => "Method is not available"}
+        "error" => %{"code" => -32_000, "message" => message}
       }
 
-      send_resp(conn, 200, Jason.encode!(response))
+      send_resp(conn, status, Jason.encode!(response))
     end
   end
 
@@ -52,5 +62,78 @@ defmodule Lasso.Integration.DiscoverySafeProbeTest do
     assert_receive {:probe_request, "debug_traceBlockByNumber", ["0x0", options]}
     assert options["timeout"] == "1s"
     assert options["tracer"] == "callTracer"
+  end
+
+  test "standard HTTP probing verifies log support without attempting subscription methods" do
+    url = start_upstream(:unsupported)
+    results = MethodSupport.probe(url, level: :standard, timeout: 2_000, concurrent: 2)
+
+    assert is_list(results)
+    assert Enum.any?(results, &(&1.method == "eth_getLogs"))
+    assert_receive {:probe_request, "eth_getLogs", _}
+
+    full_methods = MethodSupport.get_methods_for_level(:full)
+    refute "eth_subscribe" in full_methods
+    refute "eth_unsubscribe" in full_methods
+  end
+
+  test "HTTP method probing stops after authentication or quota exhaustion" do
+    for {mode, reason} <- [auth: :auth_required, quota: :quota_exhausted] do
+      url = start_upstream(mode)
+
+      assert {:aborted, ^reason} =
+               MethodSupport.probe(url, level: :critical, timeout: 2_000, concurrent: 2)
+    end
+  end
+
+  test "an aborted operator probe reports the reason without recommending capability blocks" do
+    url = start_upstream(:auth)
+    result = Discovery.probe(url, probes: [:methods], method_level: :critical, concurrent: 2)
+
+    assert result.methods == {:aborted, :auth_required}
+    assert Discovery.generate_capabilities_config(result) == %{}
+    assert Formatter.format_table(result) =~ "Method probing stopped"
+
+    assert Formatter.format_json(result) |> Jason.decode!() |> get_in(["methods", "status"]) ==
+             "aborted"
+  end
+
+  test "a 429 signals throttling without retrying the throttled method" do
+    caller = self()
+    url = start_upstream(:rate_limit)
+
+    results =
+      MethodSupport.probe(url,
+        level: :critical,
+        timeout: 2_000,
+        concurrent: 100,
+        on_throttle: fn info -> send(caller, {:throttled, info}) end
+      )
+
+    assert is_list(results)
+    assert_receive {:throttled, %{phase: :methods}}
+    assert count_probe_requests("eth_chainId", 0) == 1
+  end
+
+  defp count_probe_requests(method, count) do
+    receive do
+      {:probe_request, ^method, _params} -> count_probe_requests(method, count + 1)
+    after
+      0 -> count
+    end
+  end
+
+  defp start_upstream(mode) do
+    ref = {__MODULE__, make_ref()}
+    prior_client = Application.get_env(:lasso, :http_client)
+    {:ok, _pid} = Plug.Cowboy.http(Upstream, [observer: self(), mode: mode], ref: ref, port: 0)
+    Application.put_env(:lasso, :http_client, Lasso.RPC.Transport.HTTP.Client.Finch)
+
+    on_exit(fn ->
+      Application.put_env(:lasso, :http_client, prior_client)
+      Plug.Cowboy.shutdown(ref)
+    end)
+
+    "http://127.0.0.1:#{:ranch.get_port(ref)}"
   end
 end
