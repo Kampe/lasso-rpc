@@ -17,11 +17,10 @@ defmodule Lasso.RPC.Transports.WebSocket do
 
   require Logger
   alias Lasso.Core.Support.{ErrorClassifier, ErrorNormalizer}
-  alias Lasso.Core.Transport.{AttemptProtocol, UpstreamResponse}
+  alias Lasso.Core.Transport.{AttemptProtocol, UpstreamAdmission, UpstreamResponse}
   alias Lasso.JSONRPC.Error, as: JError
-  alias Lasso.Providers.Catalog
-  alias Lasso.RPC.PreparedRequest
-  alias Lasso.RPC.Response
+  alias Lasso.Providers.{Catalog, InstanceState}
+  alias Lasso.RPC.{ExecutionEnvelope, PreparedRequest, Response}
   alias Lasso.RPC.Transport.WebSocket.Connection, as: WSConnection
 
   # Channel represents a WebSocket connection
@@ -68,27 +67,59 @@ defmodule Lasso.RPC.Transports.WebSocket do
              )}
 
           connection_pid when is_pid(connection_pid) ->
-            channel = %{
-              profile: profile,
-              chain_id: chain_id,
-              ws_url: ws_url,
-              provider_id: provider_id,
-              instance_id: instance_id,
-              connection_pid: connection_pid,
-              config: provider_config
-            }
-
-            {:ok, channel}
+            open_connected_channel(
+              connection_pid,
+              instance_id,
+              profile,
+              chain_id,
+              ws_url,
+              provider_id,
+              provider_config
+            )
         end
     end
   end
 
   @impl true
-  def healthy?(%{connection_pid: pid}) when is_pid(pid) do
-    Process.alive?(pid)
+  def healthy?(%{connection_pid: pid, instance_id: instance_id})
+      when is_pid(pid) and is_binary(instance_id) do
+    Process.alive?(pid) and connected?(instance_id)
   end
 
   def healthy?(_), do: false
+
+  defp open_connected_channel(
+         connection_pid,
+         instance_id,
+         profile,
+         chain_id,
+         ws_url,
+         provider_id,
+         provider_config
+       ) do
+    if connected?(instance_id) do
+      {:ok,
+       %{
+         profile: profile,
+         chain_id: chain_id,
+         ws_url: ws_url,
+         provider_id: provider_id,
+         instance_id: instance_id,
+         connection_pid: connection_pid,
+         config: provider_config
+       }}
+    else
+      {:error,
+       JError.new(-32_000, "WebSocket connection not available",
+         provider_id: provider_id,
+         retriable?: true
+       )}
+    end
+  end
+
+  defp connected?(instance_id) do
+    InstanceState.read_ws_status(instance_id).status == :connected
+  end
 
   @impl true
   def capabilities(_channel) do
@@ -149,6 +180,7 @@ defmodule Lasso.RPC.Transports.WebSocket do
         instance_id: instance_id,
         provider_id: provider_id,
         transport_id: prepared.transport_id,
+        method: prepared.method,
         encoded: prepared.encoded,
         client_id: prepared.client_id,
         context: context,
@@ -187,6 +219,7 @@ defmodule Lasso.RPC.Transports.WebSocket do
           instance_id: instance_id,
           provider_id: provider_id,
           transport_id: transport_id,
+          method: method,
           encoded: encoded,
           client_id: client_id,
           context: context,
@@ -209,15 +242,49 @@ defmodule Lasso.RPC.Transports.WebSocket do
     end
   end
 
-  defp authorize_transport_request(%{
+  defp authorize_transport_request(
+         %{
+           instance_id: instance_id,
+           method: method,
+           context: context
+         } = input
+       ) do
+    case UpstreamAdmission.acquire({:ws, instance_id}, instance_id,
+           metadata: %{
+             method_class: ExecutionEnvelope.classify(method),
+             tracked_attempt?: not is_nil(context),
+             transport: :ws
+           }
+         ) do
+      {:ok, lease} ->
+        result = do_authorize_transport_request(Map.put(input, :response_lease, lease))
+
+        case result do
+          {:ok, %Response.Success{capacity_lease: ^lease}} = retained ->
+            retained
+
+          other ->
+            UpstreamAdmission.release(lease, :request_finished)
+            other
+        end
+
+      {:error, reason} ->
+        AttemptProtocol.predispatch_failure(context, :local)
+        {:error, normalize_ws_error({:local_capacity_rejection, reason}, input.provider_id)}
+    end
+  end
+
+  defp do_authorize_transport_request(%{
          instance_id: instance_id,
          provider_id: provider_id,
+         method: _method,
          transport_id: transport_id,
          encoded: encoded,
          client_id: client_id,
          context: context,
          deadline_us: deadline_us,
-         classification_context: classification_context
+         classification_context: classification_context,
+         response_lease: response_lease
        }) do
     with :ok <- AttemptProtocol.send_started(context),
          send_started_us = System.monotonic_time(:microsecond),
@@ -240,6 +307,7 @@ defmodule Lasso.RPC.Transports.WebSocket do
         context: context,
         deadline_us: deadline_us,
         classification_context: classification_context,
+        response_lease: response_lease,
         started_us: send_started_us,
         connection: connection,
         certainty: :indeterminate
@@ -284,6 +352,7 @@ defmodule Lasso.RPC.Transports.WebSocket do
          context: context,
          deadline_us: deadline_us,
          classification_context: classification_context,
+         response_lease: response_lease,
          started_us: started_us,
          connection: connection,
          certainty: certainty
@@ -299,6 +368,7 @@ defmodule Lasso.RPC.Transports.WebSocket do
           context: context,
           deadline_us: deadline_us,
           classification_context: classification_context,
+          response_lease: response_lease,
           started_us: accepted_at_us,
           connection: connection,
           certainty: certainty
@@ -316,6 +386,7 @@ defmodule Lasso.RPC.Transports.WebSocket do
           context: context,
           deadline_us: deadline_us,
           classification_context: classification_context,
+          response_lease: response_lease,
           started_us: started_us,
           connection: connection,
           certainty: :dispatched
@@ -330,17 +401,36 @@ defmodule Lasso.RPC.Transports.WebSocket do
       when validated_at_us < deadline_us ->
         io_duration_us = max(received_at_us - started_us, 0)
 
-        settle_validated_response(%{
-          validation: validation,
-          raw_bytes: raw_bytes,
-          transport_id: transport_id,
-          client_id: client_id,
-          context: context,
-          provider_id: provider_id,
-          classification_context: classification_context,
-          io_duration_us: io_duration_us,
-          validated_at_us: validated_at_us
-        })
+        case UpstreamAdmission.reserve_response(response_lease, byte_size(raw_bytes), 2) do
+          :ok ->
+            settle_validated_response(%{
+              validation: validation,
+              raw_bytes: raw_bytes,
+              transport_id: transport_id,
+              client_id: client_id,
+              context: context,
+              provider_id: provider_id,
+              classification_context: classification_context,
+              response_lease: response_lease,
+              io_duration_us: io_duration_us,
+              validated_at_us: validated_at_us
+            })
+
+          {:error, reason} ->
+            AttemptProtocol.terminal_at(
+              context,
+              :response,
+              %{
+                response_kind: :error,
+                error_code: -32_005,
+                error_category: :local_capacity_rejection,
+                io_duration_us: io_duration_us
+              },
+              validated_at_us
+            )
+
+            {:error, normalize_ws_error({:response_limit, reason}, provider_id)}
+        end
 
       {:ws_transport_response, ^token, ^generation, ^connection, _validation, _raw_bytes,
        _received_at_us, _validated_at_us} ->
@@ -377,6 +467,7 @@ defmodule Lasso.RPC.Transports.WebSocket do
          context: context,
          provider_id: provider_id,
          classification_context: classification_context,
+         response_lease: response_lease,
          io_duration_us: io_duration_us,
          validated_at_us: validated_at_us
        }) do
@@ -391,17 +482,40 @@ defmodule Lasso.RPC.Transports.WebSocket do
 
     case finalized do
       {:ok, response} ->
-        AttemptProtocol.terminal_at(
-          context,
-          :response,
-          %{response_kind: :success, io_duration_us: io_duration_us},
-          validated_at_us
-        )
+        case retain_response(response, response_lease, context) do
+          {:ok, retained_response} ->
+            AttemptProtocol.terminal_at(
+              context,
+              :response,
+              %{response_kind: :success, io_duration_us: io_duration_us},
+              validated_at_us
+            )
 
-        {:ok, response}
+            {:ok, retained_response}
+
+          {:error, reason} ->
+            AttemptProtocol.terminal_at(
+              context,
+              :response,
+              %{
+                response_kind: :error,
+                error_code: -32_005,
+                error_category: :local_capacity_rejection,
+                io_duration_us: io_duration_us
+              },
+              validated_at_us
+            )
+
+            {:error, normalize_ws_error({:response_limit, reason}, provider_id)}
+        end
 
       {:error, %JError{} = error} ->
-        %{category: category, retriable?: retriable?, breaker_penalty?: breaker_penalty?} =
+        %{
+          category: category,
+          control_category: control_category,
+          retriable?: retriable?,
+          breaker_penalty?: breaker_penalty?
+        } =
           ErrorClassifier.classify(
             error.code,
             error.message,
@@ -414,7 +528,7 @@ defmodule Lasso.RPC.Transports.WebSocket do
           %{
             response_kind: :error,
             error_code: error.code,
-            error_category: category,
+            error_category: control_category,
             io_duration_us: io_duration_us
           },
           validated_at_us
@@ -447,6 +561,18 @@ defmodule Lasso.RPC.Transports.WebSocket do
            breaker_penalty?: true,
            data: %{reason: reason}
          )}
+    end
+  end
+
+  defp retain_response(response, lease, nil) do
+    UpstreamAdmission.release(lease, :untracked_response)
+    {:ok, response}
+  end
+
+  defp retain_response(response, lease, %AttemptProtocol.Context{owner: owner}) do
+    case UpstreamAdmission.transfer(lease, owner) do
+      :ok -> {:ok, %{response | capacity_lease: lease}}
+      {:error, reason} -> {:error, reason}
     end
   end
 

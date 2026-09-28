@@ -179,6 +179,102 @@ defmodule Lasso.RPC.Transport.WebSocket.Connection.TelemetryTest do
   end
 
   describe "reconnection telemetry" do
+    test "rate-limited upgrades honor retry-after without incrementing reconnect attempts", %{
+      endpoint: endpoint
+    } do
+      {:ok, _} = start_supervised(TestSupport.FailureInjector)
+
+      TestSupport.FailureInjector.configure(endpoint.id, fn _attempt ->
+        {:error, {:ws_upgrade_error, 429, [{"retry-after", "75"}]}}
+      end)
+
+      sched_collector =
+        TelemetrySync.start_collector([:lasso, :websocket, :reconnect_scheduled],
+          match: %{provider_id: endpoint.id}
+        )
+
+      {:ok, pid} = Connection.start_link(endpoint)
+
+      {:ok, measurements, metadata} =
+        TelemetrySync.await_event(sched_collector, timeout: 2_000)
+
+      assert measurements == %{delay_ms: 75_000, jitter_ms: 0}
+      assert metadata.reason == :rate_limited
+      assert metadata.attempt == 0
+
+      GenServer.stop(pid)
+    end
+
+    test "try-again-later close frames wait before reconnecting", %{endpoint: endpoint} do
+      conn_collector = TelemetrySync.start_collector([:lasso, :websocket, :connected])
+      {:ok, pid} = Connection.start_link(endpoint)
+      {:ok, _, _} = TelemetrySync.await_event(conn_collector, timeout: 2_000)
+
+      sched_collector =
+        TelemetrySync.start_collector([:lasso, :websocket, :reconnect_scheduled],
+          match: %{provider_id: endpoint.id}
+        )
+
+      state = :sys.get_state(pid)
+
+      send(
+        pid,
+        {:ws_disconnect_event, state.connection, state.connection_id,
+         {:ws_disconnect, :close_frame, 1013, "try again later"}}
+      )
+
+      {:ok, measurements, metadata} =
+        TelemetrySync.await_event(sched_collector, timeout: 2_000)
+
+      assert measurements == %{delay_ms: 60_000, jitter_ms: 0}
+      assert metadata.reason == :rate_limited
+
+      GenServer.stop(pid)
+    end
+
+    test "stable idle-timeout close frames reconnect without capacity backoff", %{
+      endpoint: endpoint
+    } do
+      endpoint = %{endpoint | stability_ms: 0}
+      conn_collector = TelemetrySync.start_collector([:lasso, :websocket, :connected])
+      {:ok, pid} = Connection.start_link(endpoint)
+      {:ok, _, _} = TelemetrySync.await_event(conn_collector, timeout: 2_000)
+
+      sched_collector =
+        TelemetrySync.start_collector([:lasso, :websocket, :reconnect_scheduled],
+          match: %{provider_id: endpoint.id}
+        )
+
+      state = :sys.get_state(pid)
+
+      info_log =
+        ExUnit.CaptureLog.capture_log([level: :info], fn ->
+          send(
+            pid,
+            {:ws_disconnect_event, state.connection, state.connection_id,
+             {:ws_disconnect, :close_frame, 1013, "Connection timeout exceeded"}}
+          )
+
+          {:ok, measurements, metadata} =
+            TelemetrySync.await_event(sched_collector, timeout: 2_000)
+
+          assert measurements.delay_ms in 0..1_000
+          assert measurements.jitter_ms in 0..1_000
+          assert metadata.attempt == 1
+          assert metadata.reason == :idle_timeout
+          Process.sleep(25)
+        end)
+
+      refute info_log =~ "WebSocket closed"
+      refute info_log =~ "Scheduling reconnect"
+      refute info_log =~ "Reconnecting after idle timeout"
+
+      assert %{state: :closed, failure_count: 0} =
+               CircuitBreaker.get_state({"#{endpoint.chain_id}:#{endpoint.id}", :ws})
+
+      GenServer.stop(pid)
+    end
+
     test "emits reconnect_scheduled with correct delay calculation", %{endpoint: endpoint} do
       conn_collector = TelemetrySync.start_collector([:lasso, :websocket, :connected])
       {:ok, pid} = Connection.start_link(endpoint)

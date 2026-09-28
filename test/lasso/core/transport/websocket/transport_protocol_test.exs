@@ -4,7 +4,7 @@ defmodule Lasso.RPC.Transport.WebSocket.TransportProtocolTest do
   alias Lasso.Core.Request.RequestOwner
   alias Lasso.Core.Support.{CircuitBreaker, ErrorClassifier}
   alias Lasso.Core.Support.CircuitBreaker.{ControlRing, Snapshot}
-  alias Lasso.Core.Transport.AttemptProtocol
+  alias Lasso.Core.Transport.{AttemptProtocol, UpstreamAdmission}
   alias Lasso.Core.Transport.UpstreamResponse
   alias Lasso.Core.Transport.UpstreamResponse.Validated
   alias Lasso.JSONRPC.Error, as: JError
@@ -113,6 +113,16 @@ defmodule Lasso.RPC.Transport.WebSocket.TransportProtocolTest do
     assert payload === prepared.encoded
 
     assert {:ok, %Response.Success{id: nil}, _io_ms} = Task.await(task)
+  end
+
+  @tag send_mode: :auto_success
+  test "WebSocket unary requests pass through upstream admission", context do
+    accepted_before = UpstreamAdmission.stats().accepted
+
+    assert {:ok, %Response.Success{id: "admitted"}, _io_ms} =
+             WebSocket.request(context.channel, rpc_request("admitted"), 1_000)
+
+    assert UpstreamAdmission.stats().accepted == accepted_before + 1
   end
 
   @tag pending_limit: 1
