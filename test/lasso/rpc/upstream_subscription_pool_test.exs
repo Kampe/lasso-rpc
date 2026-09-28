@@ -824,6 +824,29 @@ defmodule Lasso.Core.Streaming.UpstreamSubscriptionPoolTest do
   end
 
   describe "manager restart recovery" do
+    test "a stalled upstream subscribe cannot block pool restart or stale recovery", %{
+      chain_id: chain_id,
+      profile: profile,
+      instance_id: instance_id
+    } do
+      key = {:newHeads}
+      {:ok, _sub} = UpstreamSubscriptionPool.subscribe_client(profile, chain_id, self(), key)
+      :ok = wait_until_key_active(chain_id, key)
+
+      [{manager, _}] = Registry.lookup(Lasso.Registry, {:instance_sub_manager, instance_id})
+      pool = GenServer.whereis(UpstreamSubscriptionPool.via(profile, chain_id))
+      :ok = :sys.suspend(manager)
+      on_exit(fn -> if Process.alive?(manager), do: :sys.resume(manager) end)
+
+      send(pool, {:reestablish_after_restart, key, instance_id})
+      assert %{keys: keys_after_restart} = :sys.get_state(pool, 250)
+      assert Map.has_key?(keys_after_restart, key)
+
+      send(pool, {:instance_subscription_invalidated, instance_id, key, :subscription_stale})
+      assert %{keys: keys_after_stale} = :sys.get_state(pool, 250)
+      assert Map.has_key?(keys_after_stale, key)
+    end
+
     test "pool re-establishes subscriptions after manager restart broadcast", %{
       chain_id: chain_id,
       profile: profile,

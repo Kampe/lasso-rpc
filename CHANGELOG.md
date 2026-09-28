@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Bound HTTP response retention, upstream dispatch, WebSocket frame/event ingress, subscription recovery buffers, and retry backfill within existing request and continuity budgets. Release response capacity when a successful upstream response is rejected or abandoned.
 - Discard an HTTP/1 checkout after a receive timeout so an unfinished response cannot be reused by a later request. This adds a lightweight linked task around each bounded HTTP dispatch while Finch's upstream timeout behavior remains unresolved.
+- Carry Finch send observations across that checkout task so proven predispatch failures remain retryable, while started or confirmed sends cannot be mislabeled safe to replay.
+- Recover stale or restarted WebSocket subscriptions through the continuity coordinator and bounded replay outside the per-chain pool, keeping other subscription keys responsive while an upstream subscribe stalls.
 - Preserve distinct provider opportunities during replay-safe fallback, qualify head and archive evidence before routing, and retain final upstream error attribution. An oversized `eth_getLogs` range now returns a range-actionable error where the upstream identifies that constraint.
 - Surface sustained upstream credential failures in sanitized operator diagnostics. Reconcile provider removal and supervisor recovery without publishing stale channels, and keep WebSocket recovery tied to the current connection and configured replay horizon.
 

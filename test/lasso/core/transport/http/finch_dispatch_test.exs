@@ -356,6 +356,102 @@ defmodule Lasso.RPC.Transport.HTTP.FinchDispatchTest do
     :ok = :gen_tcp.close(listener)
   end
 
+  test "a real checkout preserves confirmed-send evidence after the upstream closes" do
+    {:ok, listener} =
+      :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+    {:ok, port} = :inet.port(listener)
+    test_pid = self()
+    context = attempt_context()
+
+    server =
+      spawn(fn ->
+        {:ok, socket} = :gen_tcp.accept(listener, 1_000)
+        {:ok, _request, _remainder} = receive_http_request(socket, "")
+        send(test_pid, :upstream_received_send)
+        :gen_tcp.close(socket)
+      end)
+
+    assert {:error, _reason} =
+             FinchClient.request(
+               %{url: "http://127.0.0.1:#{port}"},
+               "eth_blockNumber",
+               [],
+               request_id: "confirmed-close",
+               timeout: 1_000,
+               finch_name: @finch_name,
+               attempt_dispatch: context
+             )
+
+    assert_receive :upstream_received_send, 1_000
+    assert %{certainty: :dispatched} = AttemptProtocol.close(context)
+
+    assert {:ok, %{kind: :transport_failure, certainty: :dispatched, reason: :closed}} =
+             AttemptProtocol.take_terminal_candidate(context)
+
+    :gen_tcp.close(listener)
+    Process.exit(server, :kill)
+  end
+
+  test "a real connection refusal remains proven predispatch" do
+    {:ok, listener} =
+      :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+    {:ok, port} = :inet.port(listener)
+    :ok = :gen_tcp.close(listener)
+    context = attempt_context()
+
+    assert {:error, _reason} =
+             FinchClient.request(
+               %{url: "http://127.0.0.1:#{port}"},
+               "eth_blockNumber",
+               [],
+               timeout: 500,
+               finch_name: @finch_name,
+               attempt_dispatch: context
+             )
+
+    assert %{certainty: :not_dispatched} = AttemptProtocol.close(context)
+    assert {:ok, %{kind: :predispatch_failure}} = AttemptProtocol.take_terminal_candidate(context)
+  end
+
+  test "a killed receive-timeout checkout retains its confirmed send" do
+    {:ok, listener} =
+      :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+    {:ok, port} = :inet.port(listener)
+    test_pid = self()
+    context = attempt_context()
+
+    server =
+      spawn(fn ->
+        {:ok, socket} = :gen_tcp.accept(listener, 1_000)
+        {:ok, _request, _remainder} = receive_http_request(socket, "")
+        send(test_pid, :upstream_held_response)
+        Process.sleep(200)
+        :gen_tcp.close(socket)
+      end)
+
+    assert {:error, :timeout} =
+             FinchClient.request(
+               %{url: "http://127.0.0.1:#{port}"},
+               "eth_blockNumber",
+               [],
+               timeout: 50,
+               finch_name: @finch_name,
+               attempt_dispatch: context
+             )
+
+    assert_receive :upstream_held_response, 1_000
+    assert %{certainty: :dispatched} = AttemptProtocol.close(context)
+
+    assert {:ok, %{kind: :transport_failure, certainty: :dispatched, reason: :timeout}} =
+             AttemptProtocol.take_terminal_candidate(context)
+
+    :gen_tcp.close(listener)
+    Process.exit(server, :kill)
+  end
+
   defp receive_http_request(socket, acc) do
     case :binary.match(acc, "\r\n\r\n") do
       {header_end, 4} ->

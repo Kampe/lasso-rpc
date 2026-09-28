@@ -63,6 +63,36 @@ defmodule Lasso.Core.Transport.HTTP.DispatchTracker do
     :ok
   end
 
+  @doc "Carries the already-open send session into Finch's checkout process."
+  @spec inherit_attempt(AttemptProtocol.context() | nil, token() | nil) :: :ok
+  def inherit_attempt(nil, _token), do: :ok
+
+  def inherit_attempt(context, token) when is_reference(token) do
+    Process.put(@session_key, %{
+      context: context,
+      token: token,
+      state: :not_started,
+      protocol_open?: true
+    })
+
+    :ok
+  end
+
+  @spec merge_attempt(AttemptProtocol.context() | nil, dispatch_state()) :: :ok
+  def merge_attempt(nil, _state), do: :ok
+
+  def merge_attempt(context, state) when state in [:not_started, :started, :confirmed] do
+    case Process.get(@session_key) do
+      %{context: ^context} = session ->
+        Process.put(@session_key, %{session | state: promote_state(session.state, state)})
+
+      _ ->
+        :ok
+    end
+
+    :ok
+  end
+
   @spec open_send(AttemptProtocol.context() | nil, token() | nil) ::
           :ok | {:error, AttemptProtocol.send_start_error()}
   def open_send(nil, _token), do: :ok
