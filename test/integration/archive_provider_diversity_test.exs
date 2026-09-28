@@ -137,6 +137,26 @@ defmodule Lasso.RPC.ArchiveProviderDiversityTest do
     assert recovered.execution_envelope.dispatch_count == 1
   end
 
+  test "block-hash log filters dispatch only to archive-capable providers" do
+    {chain, _snapshot, _plan} =
+      fixture([{"recent-a", false, [:http]}, {"capable", true, [:http]}])
+
+    params = [%{"blockHash" => "0x" <> String.duplicate("1", 64)}]
+
+    assert {:ok, _, ctx} =
+             RequestPipeline.execute_via_channels(chain, "eth_getLogs", params, %RequestOptions{
+               profile: "public",
+               strategy: :priority,
+               transport: :http,
+               timeout_ms: 2_000
+             })
+
+    assert ctx.executed_channel.provider_id == "capable"
+    assert ctx.execution_envelope.dispatch_count == 1
+    assert_receive {:dispatched, "capable", :http}
+    refute_receive {:dispatched, "recent-a", :http}, 10
+  end
+
   test "ranking retains all transports and groups aliases by physical instance" do
     a = %Channel{
       instance_id: "a",

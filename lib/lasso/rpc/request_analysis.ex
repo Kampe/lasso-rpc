@@ -54,7 +54,7 @@ defmodule Lasso.RPC.RequestAnalysis do
     case params do
       [filter] when is_map(filter) ->
         if is_binary(filter["blockHash"]) do
-          false
+          true
         else
           from_block = filter["fromBlock"] || "latest"
           to_block = filter["toBlock"] || "latest"

@@ -22,6 +22,7 @@ defmodule Lasso.BlockSync.Strategies.HttpStrategy do
 
   require Logger
 
+  alias Lasso.BlockSync.{Observation, Registry}
   alias Lasso.Config.ConfigStore
   alias Lasso.Core.Request.ExecutionScope
   alias Lasso.Core.Support.CircuitBreaker
@@ -191,7 +192,14 @@ defmodule Lasso.BlockSync.Strategies.HttpStrategy do
         {:poll, generation},
         %__MODULE__{poll_generation: generation, poll_owner_pid: nil} = state
       ) do
-    {:ok, start_poll_owner(%{state | timer_ref: nil, poll_generation: nil})}
+    state = %{state | timer_ref: nil, poll_generation: nil}
+    delay_ms = client_observation_delay_ms(state, System.system_time(:millisecond))
+
+    if delay_ms > 0 do
+      {:ok, schedule_poll(state, delay_ms)}
+    else
+      {:ok, start_poll_owner(state)}
+    end
   end
 
   def handle_message({:poll, _stale_generation}, %__MODULE__{} = state), do: {:ok, state}
@@ -256,6 +264,33 @@ defmodule Lasso.BlockSync.Strategies.HttpStrategy do
   end
 
   ## Private Functions
+
+  @doc "Remaining routine-poll delay covered by fresh HTTP client evidence."
+  @spec client_observation_delay_ms(t(), integer()) :: non_neg_integer()
+  def client_observation_delay_ms(%{consecutive_failures: failures}, _now_ms) when failures > 0,
+    do: 0
+
+  def client_observation_delay_ms(state, now_ms) do
+    case Registry.get_observation(state.chain_id, state.instance_id, :http) do
+      {:ok,
+       %HeadObservation{
+         observed_at_ms: observed_at_ms,
+         attributes: %{collection: :client, evidence_freshness_ms: freshness_ms}
+       }}
+      when is_integer(freshness_ms) and freshness_ms > 0 and observed_at_ms <= now_ms ->
+        policy_freshness =
+          Observation.stale_after_ms(state.instance_id, state.chain_id, :http)
+
+        max(
+          0,
+          min(state.poll_interval_ms, min(freshness_ms, policy_freshness)) -
+            (now_ms - observed_at_ms)
+        )
+
+      _ ->
+        0
+    end
+  end
 
   defp schedule_poll(state, delay_ms) do
     generation = make_ref()
