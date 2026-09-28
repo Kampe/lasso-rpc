@@ -1,7 +1,7 @@
 defmodule Lasso.RPC.HeadWsSourceAcceptanceTest do
   use Lasso.Test.LassoIntegrationCase
 
-  alias Lasso.BlockSync.{Registry, Worker}
+  alias Lasso.BlockSync.{Registry, Supervisor, Worker}
   alias Lasso.Config.ConfigStore
   alias Lasso.Events.HeadObserved
   alias Lasso.Observations.HeadObservation
@@ -43,7 +43,8 @@ defmodule Lasso.RPC.HeadWsSourceAcceptanceTest do
       end)
 
     for {_provider, id} <- ids do
-      start_supervised!(Supervisor.child_spec({Worker, {chain, id}}, id: {:head_worker, id}))
+      assert {:ok, pid} = Supervisor.start_worker(chain, id)
+      assert is_pid(pid)
     end
 
     Lasso.Test.Eventually.assert_eventually(fn ->
