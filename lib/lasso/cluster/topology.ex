@@ -37,6 +37,7 @@ defmodule Lasso.Cluster.Topology do
   @node_id_rediscovery_interval_ms 60_000
   @health_check_timeout_ms 5_000
   @disconnected_node_cleanup_ms 24 * 60 * 60 * 1_000
+  @health_table __MODULE__.Health
 
   @type node_state ::
           :connected | :discovering | :responding | :unresponsive | :disconnected
@@ -90,6 +91,17 @@ defmodule Lasso.Cluster.Topology do
         }
   def get_topology do
     GenServer.call(__MODULE__, :get_topology)
+  end
+
+  @doc "Reads the last local topology publication without waiting for the topology worker."
+  @spec health_snapshot() :: {:ok, map(), non_neg_integer()} | :unavailable
+  def health_snapshot do
+    case :ets.lookup(@health_table, :snapshot) do
+      [{:snapshot, observed_at, topology}] -> {:ok, topology, max(now() - observed_at, 0)}
+      [] -> :unavailable
+    end
+  rescue
+    ArgumentError -> :unavailable
   end
 
   @doc """
@@ -165,6 +177,8 @@ defmodule Lasso.Cluster.Topology do
       raise "node_id must be a non-empty string, got: #{inspect(self_node_id)}"
     end
 
+    :ets.new(@health_table, [:named_table, :protected, :set, read_concurrency: true])
+
     # Idempotent persistent_term set (avoids unnecessary global GC on supervisor restart)
     case :persistent_term.get({__MODULE__, :self_node_id}, nil) do
       ^self_node_id -> :ok
@@ -197,6 +211,7 @@ defmodule Lasso.Cluster.Topology do
       "[Topology] Started with #{map_size(initial_nodes)} nodes, node_id: #{self_node_id}"
     )
 
+    publish_health(state)
     {:ok, state}
   end
 
@@ -212,6 +227,7 @@ defmodule Lasso.Cluster.Topology do
       |> maybe_rediscover_unknown_node_ids(now)
       |> cleanup_stale_disconnected_nodes(now)
 
+    publish_health(state)
     schedule_tick()
     {:noreply, %{state | last_tick: now}}
   end
@@ -468,15 +484,7 @@ defmodule Lasso.Cluster.Topology do
   # Call handlers
   @impl true
   def handle_call(:get_topology, _from, state) do
-    result = %{
-      nodes: Map.values(state.nodes),
-      node_ids: Map.keys(state.node_ids),
-      self_node: node(),
-      self_node_id: state.self_node_id,
-      coverage: compute_coverage(state.nodes)
-    }
-
-    {:reply, result, state}
+    {:reply, topology_snapshot(state), state}
   end
 
   @impl true
@@ -515,6 +523,20 @@ defmodule Lasso.Cluster.Topology do
   end
 
   # Private helpers
+
+  defp topology_snapshot(state) do
+    %{
+      nodes: Map.values(state.nodes),
+      node_ids: Map.keys(state.node_ids),
+      self_node: node(),
+      self_node_id: state.self_node_id,
+      coverage: compute_coverage(state.nodes)
+    }
+  end
+
+  defp publish_health(state) do
+    :ets.insert(@health_table, {:snapshot, now(), topology_snapshot(state)})
+  end
 
   defp schedule_tick do
     Process.send_after(self(), :tick, @tick_interval_ms)
@@ -754,9 +776,17 @@ defmodule Lasso.Cluster.Topology do
         end
       end)
 
+    connected = connected + 1
+
+    expected =
+      case Application.get_env(:lasso, :expected_cluster_nodes) do
+        desired when is_integer(desired) and desired > 0 -> max(connected, desired)
+        _other -> connected
+      end
+
     %{
-      expected: connected + 1,
-      connected: connected + 1,
+      expected: expected,
+      connected: connected,
       responding: responding + 1,
       identified: identified + 1,
       unresponsive: unresponsive,

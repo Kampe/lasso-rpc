@@ -169,6 +169,10 @@ end
 
 config :lasso, :node_id, node_id || "local"
 
+# Optional expected fleet size for cluster diagnostics. A missing peer is
+# reported in /api/health without failing this node's liveness response.
+config :lasso, :expected_cluster_nodes, positive_integer_env.("LASSO_EXPECTED_CLUSTER_NODES", nil)
+
 # Clustering configuration (optional)
 # Requires both CLUSTER_DNS_QUERY and CLUSTER_NODE_BASENAME to be set
 # Example: CLUSTER_DNS_QUERY=myapp.internal CLUSTER_NODE_BASENAME=myapp

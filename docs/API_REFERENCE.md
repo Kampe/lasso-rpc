@@ -341,6 +341,14 @@ GET /api/health
 ```
 
 Returns process liveness and cluster topology; it does not check upstream routing.
+The response keeps HTTP 200 when cluster diagnostics are stale or unavailable.
+`cluster.snapshot_status` is `current`, `stale`, `unavailable`, or `standalone`,
+and `cluster.snapshot_age_ms` is the age of the last local topology publication
+or `null` when none exists. `cluster.nodes_configured` is the optional
+`LASSO_EXPECTED_CLUSTER_NODES` value; `cluster.nodes_total` uses that expected
+fleet size when set, and `cluster.status` compares responding nodes with the
+expected count. A missing configured peer is therefore visible in diagnostics
+without changing this node's liveness result.
 
 ### Routing readiness
 

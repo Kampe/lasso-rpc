@@ -17,6 +17,7 @@ defmodule LassoWeb.HealthController do
 
     uptime_seconds = div(uptime_ms, 1000)
     topology = HealthTopology.get()
+    configured_nodes = Application.get_env(:lasso, :expected_cluster_nodes)
 
     health_status = %{
       status: "healthy",
@@ -25,10 +26,13 @@ defmodule LassoWeb.HealthController do
       version: Application.spec(:lasso, :vsn) |> to_string(),
       cluster: %{
         enabled: topology.enabled,
+        nodes_configured: configured_nodes,
         nodes_connected: topology.coverage.connected,
         nodes_responding: topology.coverage.responding,
         nodes_total: topology.coverage.expected,
         regions: topology.regions,
+        snapshot_status: topology.snapshot_status,
+        snapshot_age_ms: topology.snapshot_age_ms,
         status: HealthTopology.cluster_status(topology)
       }
     }

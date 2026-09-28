@@ -244,6 +244,11 @@ export ALCHEMY_API_KEY="your-key-here"
 
 `GET /api/health` confirms that the application is running and reports cluster
 topology. It is a liveness check, not a routing readiness check.
+For a known fleet size, set `LASSO_EXPECTED_CLUSTER_NODES` to a positive integer
+on each node. The health response reports missing peers against that count and
+includes a cached topology snapshot age and `current`, `stale`, or `unavailable`
+status. A suspended or unavailable topology worker does not delay or fail the
+local liveness response; monitor `cluster.status` separately from HTTP status.
 
 `GET /api/ready` checks every configured chain in the default `public` profile.
 It returns HTTP 200 only when each chain has an eligible, non-rate-limited HTTP
