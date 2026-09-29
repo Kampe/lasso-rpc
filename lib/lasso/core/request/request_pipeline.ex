@@ -980,7 +980,7 @@ defmodule Lasso.RPC.RequestPipeline do
     case decision do
       {:error, error} ->
         Success.release_capacity(result, :head_policy_rejected)
-        finalize_error(error, ctx)
+        finalize_error(error, RequestContext.record_channel_success(ctx, channel))
 
       {:ok, result} ->
         case if(ctx.head_policy, do: request_open(ctx, caller_guard), else: :ok) do
@@ -989,11 +989,15 @@ defmodule Lasso.RPC.RequestPipeline do
 
           {:error, :caller_abandoned} ->
             Success.release_capacity(result, :caller_abandoned)
-            finalize_caller_abandoned(ctx)
+            finalize_caller_abandoned(RequestContext.record_channel_success(ctx, channel))
 
           {:error, :deadline_exhausted} ->
             Success.release_capacity(result, :deadline_exhausted)
-            finalize_bounded_error(ctx, :deadline_exhausted)
+
+            finalize_bounded_error(
+              RequestContext.record_channel_success(ctx, channel),
+              :deadline_exhausted
+            )
         end
 
       {:retry, error} ->

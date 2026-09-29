@@ -85,6 +85,14 @@ defmodule Lasso.RPC.RequestPipelineHeadPolicyTest do
     assert {:error, %Error{category: :block_not_available, data: data}, ctx} = request(chain)
     assert data.minimum_height == 100
     assert ctx.execution_envelope.dispatch_count == 3
+
+    assert Enum.map(ctx.attempted_channels, & &1.channel.provider_id) ==
+             ["head-1", "head-2", "head-3"]
+
+    assert Enum.map(Observability.build_client_metadata(ctx).attempted_channels, fn attempt ->
+             attempt.channel.provider_id
+           end) == ["head-1", "head-2", "head-3"]
+
     assert_receive {:head_request, "head-1", ["latest", false]}
     assert_receive {:head_request, "head-2", ["0x64", false]}
     assert_receive {:head_request, "head-3", ["0x64", false]}
