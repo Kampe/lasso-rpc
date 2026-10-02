@@ -4,6 +4,10 @@ Lasso exposes dashboard measurements, opt-in JSON-RPC response metadata, BEAM
 telemetry events, and operational logs. These signals describe different units:
 a client request can produce several upstream attempts during failover.
 
+Optional [OpenTelemetry tracing](TRACING.md) adds HTTP, routed-request and
+upstream-attempt spans, W3C propagation across workers and JSON-log correlation.
+It is disabled by default; metrics and JSON logs do not require a collector.
+
 ## Dashboard and metrics API
 
 The dashboard shows provider connectivity, circuit state, block freshness,

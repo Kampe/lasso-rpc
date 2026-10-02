@@ -1,5 +1,18 @@
 import Config
 
+otel_enabled =
+  case System.get_env("LASSO_OTEL_ENABLED", "false") do
+    "true" -> true
+    "false" -> false
+    _ -> raise "LASSO_OTEL_ENABLED must be true or false"
+  end
+
+config :lasso, :otel_enabled, otel_enabled
+
+config :opentelemetry,
+  sdk_disabled: not (otel_enabled or config_env() == :test),
+  traces_exporter: if(otel_enabled, do: :otlp, else: :none)
+
 if level = System.get_env("LOG_LEVEL") do
   case String.downcase(level) do
     value when value in ["debug", "info", "warning", "error"] ->

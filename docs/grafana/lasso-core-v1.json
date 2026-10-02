@@ -9,7 +9,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "refresh": "15s",
   "time": {
     "from": "now-1h",
@@ -182,6 +182,16 @@
             "selected": false
           }
         ]
+      },
+      {
+        "name": "traces",
+        "label": "Traces (optional)",
+        "type": "datasource",
+        "query": "tempo",
+        "refresh": 1,
+        "current": {},
+        "options": [],
+        "hide": 0
       }
     ]
   },
@@ -2419,6 +2429,18 @@
       "title": "Operator runbook",
       "type": "link",
       "url": "https://github.com/jaxernst/lasso-rpc/blob/main/docs/PROMETHEUS.md",
+      "targetBlank": true
+    },
+    {
+      "title": "Explore Lasso traces",
+      "type": "link",
+      "url": "/explore?left={%22datasource%22%3A%22${traces}%22%2C%22queries%22%3A%5B{%22refId%22%3A%22A%22%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22{%20resource.service.name%20%3D%20%5C%22lasso%5C%22%20%26%26%20span.lasso.origin%20%3D%20%5C%22client%5C%22%20}%22}%5D%2C%22range%22%3A{%22from%22%3A%22now-1h%22%2C%22to%22%3A%22now%22}}",
+      "targetBlank": true
+    },
+    {
+      "title": "Tracing setup / runbook",
+      "type": "link",
+      "url": "https://github.com/jaxernst/lasso-rpc/blob/main/docs/TRACING.md",
       "targetBlank": true
     }
   ]

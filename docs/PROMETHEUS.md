@@ -1,5 +1,8 @@
 # Prometheus operator guide
 
+For request-level drilldown and JSON-log correlation, see the optional
+[OpenTelemetry trace guide](TRACING.md).
+
 Scrape `GET /metrics` on **each Lasso node**. Counters and histograms are node-local;
 keep the Prometheus `instance` label and sum rates across nodes when calculating
 fleet throughput. No database, dashboard session, scheduler instrumentation flag,
