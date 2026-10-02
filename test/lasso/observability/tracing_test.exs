@@ -66,6 +66,27 @@ defmodule Lasso.Observability.TracingTest do
     refute_receive {:span, _}, 50
   end
 
+  test "runtime tracing opt-in reads the existing dotenv bootstrap" do
+    path = Path.join(System.tmp_dir!(), "lasso-tracing-env-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(path)
+    File.write!(Path.join(path, ".env"), "LASSO_OTEL_ENABLED=true\n")
+    config_path = Path.expand("config/runtime.exs")
+    previous = System.get_env("LASSO_OTEL_ENABLED")
+    System.delete_env("LASSO_OTEL_ENABLED")
+
+    try do
+      config = File.cd!(path, fn -> Config.Reader.read!(config_path, env: :test) end)
+      assert config[:lasso][:otel_enabled]
+      refute config[:opentelemetry][:sdk_disabled]
+    after
+      if previous,
+        do: System.put_env("LASSO_OTEL_ENABLED", previous),
+        else: System.delete_env("LASSO_OTEL_ENABLED")
+
+      File.rm_rf!(path)
+    end
+  end
+
   test "remote parent, batch items and retry attempts form one tree", state do
     remote_trace = String.duplicate("a", 32)
     remote_parent = String.duplicate("b", 16)
