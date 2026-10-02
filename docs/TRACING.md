@@ -4,6 +4,9 @@ Tracing is optional and disabled by default. JSON logs and Prometheus metrics
 continue to work without a trace backend. Enable after configuring an OTLP
 receiver such as Grafana Alloy or the OpenTelemetry Collector:
 
+`LASSO_OTEL_ENABLED` accepts `true`/`1` and `false`/`0`, matching other runtime
+boolean flags. Omission defaults to disabled.
+
 ```sh
 LASSO_OTEL_ENABLED=true
 OTEL_SERVICE_NAME=lasso
@@ -130,6 +133,10 @@ or change RPC results. This is best-effort telemetry; spans can be dropped
 under pressure or on shutdown. The queue bounds finished spans, not total VM
 memory or all in-flight spans. Tune standard `OTEL_BSP_MAX_QUEUE_SIZE`,
 `OTEL_BSP_SCHEDULE_DELAY_MILLIS` and `OTEL_BSP_EXPORT_TIMEOUT_MILLIS` variables.
+The SDK may flush synchronously during application shutdown and delay exit
+after Lasso has stopped. Its batch export timeout does not guard that synchronous
+shutdown flush; allow for graceful shutdown and verify the chosen exporter's
+behavior when sizing the pod's termination grace period.
 
 If traces disappear, check the Lasso flag, `OTEL_SDK_DISABLED`, receiver
 address/protocol/authentication, sampler and collector export/drop metrics.

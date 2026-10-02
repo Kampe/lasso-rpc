@@ -45,9 +45,9 @@ end
 
 otel_enabled =
   case System.get_env("LASSO_OTEL_ENABLED", "false") do
-    "true" -> true
-    "false" -> false
-    _ -> raise "LASSO_OTEL_ENABLED must be true or false"
+    value when value in ["true", "1"] -> true
+    value when value in ["false", "0"] -> false
+    _ -> raise "LASSO_OTEL_ENABLED must be true, false, 1, or 0"
   end
 
 config :lasso, :otel_enabled, otel_enabled

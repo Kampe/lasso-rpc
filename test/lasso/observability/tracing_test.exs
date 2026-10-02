@@ -87,6 +87,47 @@ defmodule Lasso.Observability.TracingTest do
     end
   end
 
+  test "production config stays disabled without opt-in and accepts the existing numeric flag convention" do
+    path =
+      Path.join(System.tmp_dir!(), "lasso-tracing-default-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(path)
+    config_path = Path.expand("config/runtime.exs")
+
+    keys =
+      ~w(LASSO_OTEL_ENABLED LASSO_NODE_ID SECRET_KEY_BASE LASSO_BLOCK_PUBLICATION_MEMBERS LASSO_BLOCK_PUBLICATION_DATABASE_URL)
+
+    previous = Map.new(keys, &{&1, System.get_env(&1)})
+    System.delete_env("LASSO_OTEL_ENABLED")
+    System.put_env("LASSO_NODE_ID", "tracing-config-test")
+    System.put_env("SECRET_KEY_BASE", String.duplicate("0", 64))
+    System.delete_env("LASSO_BLOCK_PUBLICATION_MEMBERS")
+    System.delete_env("LASSO_BLOCK_PUBLICATION_DATABASE_URL")
+
+    try do
+      File.cd!(path, fn ->
+        config = Config.Reader.read!(config_path, env: :prod)
+        refute config[:lasso][:otel_enabled]
+        assert config[:opentelemetry][:sdk_disabled]
+        assert config[:opentelemetry][:traces_exporter] == :none
+
+        for {value, enabled} <- [{"1", true}, {"0", false}] do
+          System.put_env("LASSO_OTEL_ENABLED", value)
+          config = Config.Reader.read!(config_path, env: :prod)
+          assert config[:lasso][:otel_enabled] == enabled
+          assert config[:opentelemetry][:sdk_disabled] == not enabled
+          assert config[:opentelemetry][:traces_exporter] == if(enabled, do: :otlp, else: :none)
+        end
+      end)
+    after
+      for {key, value} <- previous do
+        if value, do: System.put_env(key, value), else: System.delete_env(key)
+      end
+
+      File.rm_rf!(path)
+    end
+  end
+
   test "remote parent, batch items and retry attempts form one tree", state do
     remote_trace = String.duplicate("a", 32)
     remote_parent = String.duplicate("b", 16)
