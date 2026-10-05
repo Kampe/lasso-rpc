@@ -154,9 +154,11 @@ configured routes and 2,048 profile/chains (including chains with no providers).
 `lasso_observer_route_scan_truncated` and `lasso_observer_chain_scan_truncated`
 report when the configuration exceeds these bounded scans. Capacity saturation or probe collisions increase
 `lasso_observer_dropped_total`; existing rows continue to update.
-Configured profile, provider and physical instance IDs retain their full values
-so distinct routes and credential-distinct upstreams remain separate and match
-`lasso_provider_info`. Method and reason dimensions are
+Configured profile and provider IDs use the request path's `BoundedIdentifier`
+encoding in every metric family: valid UTF-8 values up to 128 bytes remain
+unchanged; longer values use a `sha256:` fingerprint. Dashboard selectors use
+these same encoded labels from `lasso_provider_info`. Physical instance IDs
+retain their full value, including the credential fingerprint. Method and reason dimensions are
 allowlisted. Do not generate per-user provider IDs.
 
 Scrapes read node-local snapshots and BEAM totals, with no dashboard collector or

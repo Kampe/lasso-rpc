@@ -283,24 +283,14 @@ defmodule Lasso.Observability.Prometheus do
 
   defp circuit_state(_id, _transport), do: :unknown
 
-  defp provider_label(provider) when is_binary(provider), do: provider
+  defp provider_label(provider) when is_binary(provider),
+    do: Lasso.RPC.BoundedIdentifier.encode(provider)
+
   defp provider_label(_provider), do: "unknown"
   defp method_label(method) when method in @methods, do: method
   defp method_label(_method), do: "other"
   defp outcome_label(result) when result in [:success, :error], do: Atom.to_string(result)
   defp outcome_label(_result), do: "other"
 
-  defp sample(name, value, labels) do
-    encoded = Enum.map_join(labels, ",", fn {key, item} -> ~s(#{key}="#{escape(item)}") end)
-
-    if encoded == "", do: "#{name} #{value}", else: "#{name}{#{encoded}} #{value}"
-  end
-
-  defp escape(value) do
-    value
-    |> to_string()
-    |> String.replace("\\", "\\\\")
-    |> String.replace("\n", "\\n")
-    |> String.replace("\"", "\\\"")
-  end
+  defp sample(name, value, labels), do: PrometheusMetrics.sample(name, value, labels)
 end

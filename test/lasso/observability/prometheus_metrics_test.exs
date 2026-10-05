@@ -273,6 +273,64 @@ defmodule Lasso.Observability.PrometheusMetricsTest do
     assert PrometheusMetrics.stats().series == 4
   end
 
+  test "over-128-byte route IDs match canonical hashed telemetry and all route gauges" do
+    alias Lasso.RPC.BoundedIdentifier
+    profile = String.duplicate("p", 129)
+    providers = for suffix <- ["first", "second"], do: String.duplicate("a", 129) <> suffix
+    encoded_profile = BoundedIdentifier.encode(profile)
+
+    for provider <- providers do
+      encoded_provider = BoundedIdentifier.encode(provider)
+      request(10, %{profile: encoded_profile, provider_id: encoded_provider})
+      request(10, %{profile: profile, provider_id: provider})
+
+      :telemetry.execute([:lasso, :rpc, :attempt, :terminal], %{}, %{
+        chain_id: 1,
+        provider_id: encoded_provider,
+        transport: :http,
+        outcome: :service_failure,
+        error_category: :network_error
+      })
+
+      body = output()
+      assert body =~ ~s(profile="#{encoded_profile}",chain="1",provider="#{encoded_provider}")
+      assert body =~ ~s(lasso_upstream_attempts_total{chain="1",provider="#{encoded_provider}")
+
+      legacy =
+        Prometheus.scrape()
+        |> String.split("\n")
+        |> Enum.filter(&String.starts_with?(&1, "lasso_rpc_requests_total{"))
+
+      assert Enum.any?(
+               legacy,
+               &(String.contains?(&1, ~s(provider="#{encoded_provider}")) and
+                   String.ends_with?(&1, " 2"))
+             )
+
+      mapping =
+        PrometheusRuntime.route_samples(profile, 1, provider, nil, false)
+        |> Enum.join("\n")
+
+      assert mapping =~ ~s(profile="#{encoded_profile}",chain="1",provider="#{encoded_provider}")
+      readiness = PrometheusRuntime.readiness_samples([{profile, 1}]) |> Enum.join("\n")
+      assert readiness =~ ~s(profile="#{encoded_profile}")
+
+      state =
+        PrometheusMetrics.sample("lasso_circuit_state", 1,
+          profile: profile,
+          chain: 1,
+          provider: provider,
+          state: "closed"
+        )
+
+      assert state =~ ~s(profile="#{encoded_profile}",chain="1",provider="#{encoded_provider}")
+      refute body =~ ~s(provider="#{provider}")
+      refute mapping =~ ~s(profile="#{profile}")
+    end
+
+    assert PrometheusMetrics.stats().series == 4
+  end
+
   test "real continuity admissions retain rejection kinds and reasons" do
     alias Lasso.Core.Streaming.ContinuityBudget
 

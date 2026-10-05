@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Evaluate dashboard regressions using promtool (Prometheus 3.5+)."""
+import base64
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -84,6 +86,24 @@ TESTS.extend([
         series("lasso_provider_info", PHYSICAL | dict(provider=LONG_PROVIDER, profile=LONG_PROFILE), "1+0x5")
     ], expression(22, provider=LONG_PROVIDER, profile=LONG_PROFILE), WS_SAMPLE),
 ])
+
+
+
+def bounded_identifier(value):
+    raw = value.encode("utf-8")
+    return value if len(raw) <= 128 else "sha256:" + base64.urlsafe_b64encode(hashlib.sha256(raw).digest()).decode().rstrip("=")
+
+
+HASH_PROFILE = bounded_identifier("p" * 129)
+HASH_PROVIDERS = [bounded_identifier("a" * 129 + suffix) for suffix in ["first", "second"]]
+for provider in HASH_PROVIDERS:
+    route = ROUTE | dict(profile=HASH_PROFILE, provider=provider)
+    TESTS.append(case("hashed route filters retain completion evidence " + provider, [
+        series("lasso_rpc_request_duration_seconds_count", route | dict(outcome="success"), "0+60x5")
+    ], expression(12, profile=HASH_PROFILE, provider=provider), [sample("{}", 0)]))
+TESTS.append(case("hashed route mapping selects physical connection", [WS,
+    series("lasso_provider_info", PHYSICAL | dict(profile=HASH_PROFILE, provider=HASH_PROVIDERS[0]), "1+0x5")
+], expression(22, profile=HASH_PROFILE, provider=HASH_PROVIDERS[0]), WS_SAMPLE))
 
 
 def main():

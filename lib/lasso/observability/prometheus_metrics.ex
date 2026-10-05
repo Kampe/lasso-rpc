@@ -8,6 +8,8 @@ defmodule Lasso.Observability.PrometheusMetrics do
   wallet addresses or subscription keys become labels.
   """
 
+  alias Lasso.RPC.BoundedIdentifier
+
   @table :lasso_prometheus_observations
   @stats :lasso_prometheus_observation_stats
   @capacity 4_096
@@ -253,7 +255,7 @@ defmodule Lasso.Observability.PrometheusMetrics do
   defp instance_identity(value) when is_binary(value), do: value
   defp instance_identity(_), do: "unknown"
 
-  defp identity(value) when is_binary(value), do: value
+  defp identity(value) when is_binary(value), do: BoundedIdentifier.encode(value)
   defp identity(_), do: "unknown"
   defp method(value) when value in @methods, do: value
   defp method(_), do: "other"
@@ -403,7 +405,12 @@ defmodule Lasso.Observability.PrometheusMetrics do
 
   @doc false
   def sample(name, value, labels) do
-    encoded = Enum.map_join(labels, ",", fn {key, item} -> ~s(#{key}="#{escape(item)}") end)
+    encoded =
+      Enum.map_join(labels, ",", fn {key, item} ->
+        item = if key in [:profile, :provider], do: identity(item), else: item
+        ~s(#{key}="#{escape(item)}")
+      end)
+
     if encoded == "", do: "#{name} #{value}", else: "#{name}{#{encoded}} #{value}"
   end
 
