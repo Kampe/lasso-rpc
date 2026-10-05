@@ -93,4 +93,54 @@ defmodule Lasso.PrometheusEndpointIntegrationTest do
         ~s(lasso_upstream_attempts_total{chain="#{chain}",provider="canonical_failure",transport="http")
     end)
   end
+
+  test "multi-route scrape groups declarations before contiguous family samples", %{chain: chain} do
+    setup_providers([
+      %{id: "format_a", profile: "public", behavior: :healthy},
+      %{id: "format_b", profile: "public", behavior: :healthy}
+    ])
+
+    body = Prometheus.scrape()
+    assert body =~ ~s(provider="format_a")
+    assert body =~ ~s(provider="format_b")
+    lines = String.split(body, "\n", trim: true)
+    names = for "# TYPE " <> rest <- lines, do: rest |> String.split(" ") |> hd()
+    assert length(names) == length(Enum.uniq(names))
+    families = MapSet.new(names)
+
+    sequence =
+      Enum.map(lines, fn line ->
+        case line do
+          "# HELP " <> rest ->
+            rest |> String.split(" ") |> hd()
+
+          "# TYPE " <> rest ->
+            rest |> String.split(" ") |> hd()
+
+          sample ->
+            name = sample |> String.split(["{", " "], parts: 2) |> hd()
+
+            if MapSet.member?(families, name),
+              do: name,
+              else: String.replace(name, ~r/_(bucket|sum|count)$/, "")
+        end
+      end)
+
+    groups = sequence |> Enum.chunk_by(& &1) |> Enum.map(&hd/1)
+    assert length(groups) == length(Enum.uniq(groups))
+
+    for name <- names do
+      type_index = Enum.find_index(lines, &String.starts_with?(&1, "# TYPE #{name} "))
+
+      samples =
+        Enum.with_index(lines)
+        |> Enum.filter(fn {line, _} ->
+          not String.starts_with?(line, "#") and String.starts_with?(line, name)
+        end)
+
+      for {_line, index} <- samples, do: assert(type_index < index)
+    end
+
+    assert body =~ ~s(chain="#{chain}")
+  end
 end

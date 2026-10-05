@@ -26,6 +26,7 @@ defmodule Lasso.Observability.PrometheusMetrics do
     rate_limit authentication authorization server_error network_error connection_error
     block_not_available capability_violation method_not_found method_error auth_error
     chain_error invalid_params parse_error user_error client_error execution_revert
+    deterministic ambiguous capability local_safety
     provider_error provider_failure protocol_error unknown_error unclassified_server_error
     internal_error invalid_request unsupported_method local_capacity_rejection
     circuit_open deadline_exceeded healthy degraded exhausted admission_rejected
@@ -42,9 +43,6 @@ defmodule Lasso.Observability.PrometheusMetrics do
     {"lasso_upstream_attempts_total", :counter,
      "Non-success dispatched attempt diagnostics; successes are not emitted"},
     {"lasso_rpc_failovers_total", :counter, "Failover count reported by routed completions"},
-    {"lasso_failover_events_total", :counter, "Failover and exhaustion events"},
-    {"lasso_admission_rejections_total", :counter,
-     "Candidates rejected before upstream dispatch"},
     {"lasso_circuit_transitions_total", :counter, "Circuit transitions by bounded reason"},
     {"lasso_circuit_failures_total", :counter, "Circuit failures by bounded category"},
     {"lasso_circuit_recovery_attempts_total", :counter, "Proactive circuit recovery attempts"},
@@ -69,12 +67,6 @@ defmodule Lasso.Observability.PrometheusMetrics do
   @events [
     [:lasso, :rpc, :request, :stop],
     [:lasso, :rpc, :attempt, :terminal],
-    [:lasso, :rpc, :admission, :rejected],
-    [:lasso, :failover, :fast_fail],
-    [:lasso, :failover, :circuit_open],
-    [:lasso, :failover, :degraded_mode],
-    [:lasso, :failover, :degraded_success],
-    [:lasso, :failover, :exhaustion],
     [:lasso, :circuit_breaker, :open],
     [:lasso, :circuit_breaker, :close],
     [:lasso, :circuit_breaker, :half_open],
@@ -134,17 +126,6 @@ defmodule Lasso.Observability.PrometheusMetrics do
     ]
 
     counter("lasso_upstream_attempts_total", labels)
-  end
-
-  defp observe([:lasso, :rpc, :admission, :rejected], _ms, meta) do
-    counter(
-      "lasso_admission_rejections_total",
-      route_labels(meta) ++ [reason: enum(meta[:reason])]
-    )
-  end
-
-  defp observe([:lasso, :failover, kind], _ms, meta) do
-    counter("lasso_failover_events_total", route_labels(meta) ++ [kind: enum(kind)])
   end
 
   defp observe([:lasso, :circuit_breaker, kind], _ms, meta) do

@@ -151,18 +151,40 @@ defmodule Lasso.Observability.Prometheus do
          "Configured chain readiness scan exceeded its cap",
          [{if(length(chain_scan) > @max_routes, do: 1, else: 0), []}]
        ))
-    |> Stream.transform(MapSet.new(), fn line, headers ->
-      cond do
-        not String.starts_with?(line, "#") -> {[line], headers}
-        MapSet.member?(headers, line) -> {[], headers}
-        true -> {[line], MapSet.put(headers, line)}
-      end
-    end)
+    |> group_families()
     |> Enum.join("\n")
     |> Kernel.<>("\n")
   rescue
     ArgumentError ->
       "# HELP lasso_observer_available Local metrics observer is available\n# TYPE lasso_observer_available gauge\nlasso_observer_available 0\n"
+  end
+
+  # Route and chain builders can repeat a family. Emit each declaration once,
+  # before all of that family's samples, including histogram suffix series.
+  defp group_families(lines) do
+    names =
+      for "# TYPE " <> rest <- lines, into: MapSet.new() do
+        rest |> String.split(" ", parts: 2) |> hd()
+      end
+
+    lines
+    |> Enum.group_by(fn
+      "# HELP " <> rest ->
+        rest |> String.split(" ", parts: 2) |> hd()
+
+      "# TYPE " <> rest ->
+        rest |> String.split(" ", parts: 2) |> hd()
+
+      line ->
+        name = line |> String.split(["{", " "], parts: 2) |> hd()
+        base = String.replace(name, ~r/_(bucket|sum|count)$/, "")
+        if MapSet.member?(names, name), do: name, else: base
+    end)
+    |> Enum.sort_by(fn {name, _} -> name end)
+    |> Enum.flat_map(fn {_name, family} ->
+      {headers, samples} = Enum.split_with(family, &String.starts_with?(&1, "#"))
+      Enum.sort(Enum.uniq(headers)) ++ samples
+    end)
   end
 
   defp record(key) do

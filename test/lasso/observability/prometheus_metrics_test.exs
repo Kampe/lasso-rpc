@@ -95,14 +95,14 @@ defmodule Lasso.Observability.PrometheusMetricsTest do
       url: "https://secret/key"
     })
 
-    :telemetry.execute([:lasso, :rpc, :admission, :rejected], %{count: 1}, %{
+    :telemetry.execute([:lasso, :circuit_breaker, :failure], %{count: 1}, %{
       chain_id: 1,
-      reason: "private-secret-error"
+      error_category: "private-secret-error"
     })
 
     body = output()
     assert body =~ ~s(method="other")
-    assert body =~ ~s(reason="other")
+    assert body =~ ~s(category="other")
 
     for secret <- [
           "private_wallet",
@@ -115,7 +115,12 @@ defmodule Lasso.Observability.PrometheusMetricsTest do
 
   test "series admission is bounded and overflow remains visible" do
     for id <- 1..8000 do
-      PrometheusMetrics.handle_event([:lasso, :failover, :exhaustion], %{}, %{chain_id: id}, nil)
+      PrometheusMetrics.handle_event(
+        [:lasso, :rpc, :attempt, :terminal],
+        %{},
+        %{chain_id: id},
+        nil
+      )
     end
 
     stats = PrometheusMetrics.stats()
@@ -128,11 +133,15 @@ defmodule Lasso.Observability.PrometheusMetricsTest do
 
   test "removed event sources do not create misleading series" do
     refute [:lasso, :rpc, :attempt, :stop] in PrometheusMetrics.events()
+    refute [:lasso, :rpc, :admission, :rejected] in PrometheusMetrics.events()
+    refute [:lasso, :failover, :exhaustion] in PrometheusMetrics.events()
     refute [:phoenix, :endpoint, :stop] in PrometheusMetrics.events()
     refute [:lasso, :circuit_breaker, :timeout] in PrometheusMetrics.events()
     body = output()
     refute body =~ "lasso_upstream_attempt_duration_seconds"
     refute body =~ "lasso_http_"
+    refute body =~ "lasso_admission_rejections_total"
+    refute body =~ "lasso_failover_events_total"
     refute body =~ "lasso_circuit_timeouts_total"
   end
 
@@ -209,6 +218,26 @@ defmodule Lasso.Observability.PrometheusMetricsTest do
     assert body =~ ~s(outcome="service_failure",category="protocol_error")
     refute body =~ "lasso_upstream_attempt_duration_seconds"
     refute body =~ "outcome=\"usable_success\""
+
+    for category <- [
+          :deterministic,
+          :ambiguous,
+          :quota,
+          :capability,
+          :provider_failure,
+          :local_safety
+        ] do
+      response =
+        AttemptTerminal.Response.new(identity, :application_error, 17_000,
+          error_code: -32_000,
+          error_category: category
+        )
+
+      AttemptProjection.process(AttemptProjection.new(response, "recorder", "eth_call"))
+      expected = if category == :quota, do: :rate_limit, else: category
+      assert_receive {:terminal, %{error_category: ^expected}}, 1000
+      assert output() =~ ~s(category="#{expected}")
+    end
   end
 
   test "scrape contains one TYPE per family and VM metrics do not require a dashboard" do

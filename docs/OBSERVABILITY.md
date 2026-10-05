@@ -16,7 +16,7 @@ observations display as unavailable rather than a measured zero.
 for its fields and units.
 
 `GET /metrics` exposes bounded sampled routed-completion latency histograms,
-non-success attempt diagnostics, failover/admission events, circuit recovery,
+non-success attempt diagnostics, sampled completion failovers, circuit recovery,
 chain-wide head evidence, WebSocket continuity budgets and BEAM pressure.
 Successful request diagnostics sample above 256/s per profile, chain and origin;
 these are observation rates, not exact request counts.

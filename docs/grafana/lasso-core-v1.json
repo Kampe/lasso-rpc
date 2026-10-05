@@ -1155,75 +1155,6 @@
       }
     },
     {
-      "id": 18,
-      "title": "Admission / failover events",
-      "description": "Includes system probes and legacy events without profile context. Choose profile/provider All to inspect those unknown-label events. Admission rejection does not mean an upstream received a request.",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 47,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by(chain,kind)(rate(lasso_failover_events_total{job=~\"$job\",instance=~\"$node\",profile=~\"$profile\",chain=~\"$chain\",provider=~\"$provider\"}[$__rate_interval]))",
-          "legendFormat": "{{chain}} / {{kind}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "range": true,
-          "instant": false
-        },
-        {
-          "refId": "B",
-          "expr": "sum by(chain,reason)(rate(lasso_admission_rejections_total{job=~\"$job\",instance=~\"$node\",profile=~\"$profile\",chain=~\"$chain\",provider=~\"$provider\"}[$__rate_interval]))",
-          "legendFormat": "{{chain}} / rejected / {{reason}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "range": true,
-          "instant": false
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ops",
-          "noValue": "No data",
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ]
-        }
-      }
-    },
-    {
       "id": 19,
       "title": "WebSocket delivery \u2014 transport health",
       "type": "row",
@@ -1239,7 +1170,7 @@
     {
       "id": 22,
       "title": "WebSocket connection churn",
-      "description": "Connection/disconnection events, not an active subscription count. Unknown profile may occur in physical connection events.",
+      "description": "Physical upstream connection events supply chain and provider, but no profile. The profile filter does not apply.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -1254,7 +1185,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by(chain,provider,event)(rate(lasso_websocket_connections_total{job=~\"$job\",instance=~\"$node\",profile=~\"$profile\",chain=~\"$chain\",provider=~\"$provider\"}[$__rate_interval]))",
+          "expr": "sum by(chain,provider,event)(rate(lasso_websocket_connections_total{job=~\"$job\",instance=~\"$node\",chain=~\"$chain\",provider=~\"$provider\"}[$__rate_interval]))",
           "legendFormat": "{{chain}} / {{provider}} / {{event}}",
           "datasource": {
             "type": "prometheus",

@@ -45,8 +45,6 @@ or subscription keys.
 | `lasso_rpc_request_duration_seconds` | Final routed latency, including attempts/failover | profile, chain, provider, method, transport, origin, outcome |
 | `lasso_upstream_attempts_total` | Non-success dispatched attempt diagnostics only | chain, provider, transport, outcome, category |
 | `lasso_rpc_failovers_total` | Sum of failovers recorded at final completion | route labels without outcome |
-| `lasso_admission_rejections_total` | Candidate rejected before dispatch | route labels, bounded reason |
-| `lasso_failover_events_total` | Skip, fast-fail, degraded recovery or exhaustion events | route labels, kind |
 | `lasso_circuit_state` | Existing one-hot local HTTP/WS circuit state | profile, chain, provider, transport, state |
 | `lasso_circuit_ready` / `lasso_circuit_failures` | Owner admission readiness and consecutive failures | profile, chain, provider, transport |
 | `lasso_circuit_half_open_capacity` / `lasso_circuit_half_open_inflight` | Recovery probe slots and occupancy | profile, chain, provider, transport |
@@ -58,7 +56,7 @@ or subscription keys.
 | `lasso_provider_transport_configured` | Whether HTTP/WS is configured | profile, chain, provider, transport |
 | `lasso_provider_head_observed` | Fresh head-lag evidence exists (1/0) | profile, chain, provider |
 | `lasso_provider_head_lag_blocks` | Chain-wide compatibility lag in blocks; not scoped routing-policy evidence | profile, chain, provider |
-| `lasso_websocket_connections_total` | Connection/disconnection events; not active subscriptions | profile, chain, provider, event |
+| `lasso_websocket_connections_total` | Physical connection/disconnection events; no active subscription count | chain, provider, event; profile is always unknown |
 | `lasso_subscription_events_total` / `lasso_subscription_recovery_duration_seconds` | Failover, reorg repair, drops and slow-consumer termination | available profile/chain/provider, kind/reason |
 | `lasso_stream_budget_bytes` / `_messages` / `_owners` | Continuity reservations and queued deliveries | kind where applicable |
 | `lasso_stream_ingress_bytes` / `_messages` / `_rejections_total` | Internal ingress reservations and cumulative losses | node-local |
@@ -104,7 +102,7 @@ interpreting missing circuit-admission samples as a failure.
 
 ### One upstream circuit opens
 
-Check the provider's circuit on each node, head evidence, successful attempts and
+Check the provider's circuit on each node, head evidence, non-success attempt diagnostics and
 client completion success. If alternatives are fresh and client traffic succeeds,
 Lasso is containing an upstream failure. Inspect bounded failure categories and
 recovery delay; do not repeatedly reset the circuit or restart healthy nodes.
@@ -113,7 +111,7 @@ A still-open circuit is reduced redundancy even when client service is healthy.
 ### Latency climbs under load
 
 Inspect sampled final p95/p99, non-success attempt diagnostics, failovers,
-admission rejections, run queue and memory. Inspect upstream logs to compare
+circuit admission readiness, run queue and memory. Inspect upstream logs to compare
 provider speed; successful-attempt latency is not exported.
 Quantiles must sum histogram buckets before `histogram_quantile`; do not average
 per-node p95 values. Use a rate window spanning several scrape intervals.
@@ -168,3 +166,7 @@ Treat the dashboard as evidence, then set alert thresholds from your own service
 objectives and observed traffic. Low-volume ratios should require a minimum
 request rate. Alert separately on client completion failure, loss of fresh
 alternatives, and a single quarantined upstream; these have different impacts.
+
+Failover-event and admission-rejection counters are not exported: the legacy
+sink has no production callers. Inspect circuit admission gauges and the
+sampled completion-reported failover counter instead.
