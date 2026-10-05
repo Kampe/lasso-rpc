@@ -63,6 +63,16 @@ TESTS = [
 ]
 
 
+LONG_IDS = ["1:" + "a" * 63 + ":" + suffix for suffix in ["0123456789ab", "fedcba987654"]]
+LONG_WS = [series("lasso_websocket_connections_total", PHYSICAL | dict(instance_id=id, event="connected"),
+                  f"0+{rate}x5") for id, rate in zip(LONG_IDS, [60, 120])]
+LONG_MAPS = [series("lasso_provider_info", PHYSICAL | dict(instance_id=id, profile="public", provider="drpc"),
+                    "1+0x5") for id in LONG_IDS]
+TESTS.append(case("long credential-distinct physical instances stay separate", [*LONG_WS, *LONG_MAPS],
+                  expression(22), [sample(f'{{chain="1",instance_id="{id}",event="connected"}}', rate)
+                                   for id, rate in zip(LONG_IDS, [1, 2])]))
+
+
 def main():
     promtool = sys.argv[1] if len(sys.argv) > 1 else "promtool"
     with tempfile.TemporaryDirectory(prefix="lasso-promql-") as directory:

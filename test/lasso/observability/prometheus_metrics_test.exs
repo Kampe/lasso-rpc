@@ -175,6 +175,64 @@ defmodule Lasso.Observability.PrometheusMetricsTest do
     refute output() =~ ~s(provider="1:drpc:7ce04b4c2a3f")
   end
 
+  test "long credential-distinct instances retain full identity in counters and mappings" do
+    alias Lasso.Config.ChainConfig.Provider
+    alias Lasso.Providers.InstanceId
+
+    provider = %Provider{id: "drpc", url: "https://#{String.duplicate("a", 63)}.com"}
+
+    ids =
+      for credential <- ["first", "second"] do
+        InstanceId.derive(1, %{provider | api_key: credential})
+      end
+
+    assert Enum.all?(ids, &(String.length(&1) == 78))
+    assert Enum.uniq(Enum.map(ids, &String.slice(&1, 0, 64))) |> length() == 1
+
+    for id <- ids do
+      :telemetry.execute([:lasso, :websocket, :connected], %{count: 1}, %{
+        chain_id: 1,
+        provider_id: id
+      })
+
+      for event <- [:open, :failure, :proactive_recovery] do
+        :telemetry.execute([:lasso, :circuit_breaker, event], %{count: 1}, %{
+          instance_id: id,
+          transport: :ws,
+          reason: :failure_threshold,
+          error_category: :network_error,
+          circuit_state: :open
+        })
+      end
+
+      mapping =
+        PrometheusRuntime.route_samples("public", 1, "drpc", id, false)
+        |> Enum.join("\n")
+
+      assert mapping =~ ~s(instance_id="#{id}")
+
+      for family <- [
+            "lasso_websocket_connections_total",
+            "lasso_circuit_transitions_total",
+            "lasso_circuit_failures_total",
+            "lasso_circuit_recovery_attempts_total"
+          ] do
+        samples =
+          output()
+          |> String.split("\n")
+          |> Enum.filter(&String.starts_with?(&1, family <> "{"))
+
+        assert Enum.any?(
+                 samples,
+                 &(String.contains?(&1, ~s(instance_id="#{id}")) and
+                     String.ends_with?(&1, " 1"))
+               )
+      end
+    end
+
+    assert PrometheusMetrics.stats().series == 8
+  end
+
   test "real continuity admissions retain rejection kinds and reasons" do
     alias Lasso.Core.Streaming.ContinuityBudget
 

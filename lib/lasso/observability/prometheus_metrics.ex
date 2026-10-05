@@ -133,7 +133,10 @@ defmodule Lasso.Observability.PrometheusMetrics do
   end
 
   defp observe([:lasso, :circuit_breaker, kind], _ms, meta) do
-    labels = [instance_id: identity(meta[:instance_id]), transport: enum(meta[:transport])]
+    labels = [
+      instance_id: instance_identity(meta[:instance_id]),
+      transport: enum(meta[:transport])
+    ]
 
     case kind do
       state when state in [:open, :close, :half_open] ->
@@ -156,7 +159,7 @@ defmodule Lasso.Observability.PrometheusMetrics do
   defp observe([:lasso, :websocket, kind], _ms, meta) do
     counter("lasso_websocket_connections_total",
       chain: chain(meta),
-      instance_id: identity(meta[:provider_id]),
+      instance_id: instance_identity(meta[:provider_id]),
       event: enum(kind)
     )
   end
@@ -245,6 +248,10 @@ defmodule Lasso.Observability.PrometheusMetrics do
       _ -> "unknown"
     end
   end
+
+  # Physical IDs include a credential fingerprint; truncation can merge upstreams.
+  defp instance_identity(value) when is_binary(value), do: value
+  defp instance_identity(_), do: "unknown"
 
   defp identity(value) when is_binary(value), do: String.slice(value, 0, 64)
   defp identity(_), do: "unknown"
