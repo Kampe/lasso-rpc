@@ -40,9 +40,7 @@ defmodule Lasso.Observability.PrometheusMetrics do
     {"lasso_rpc_request_duration_seconds", :histogram,
      "Routed completion duration, including failovers"},
     {"lasso_upstream_attempts_total", :counter,
-     "Dispatched upstream attempts, including failed and cancelled attempts"},
-    {"lasso_upstream_attempt_duration_seconds", :histogram,
-     "Upstream elapsed I/O or censored timeout/cancellation boundary"},
+     "Non-success dispatched attempt diagnostics; successes are not emitted"},
     {"lasso_rpc_failovers_total", :counter, "Failover count reported by routed completions"},
     {"lasso_failover_events_total", :counter, "Failover and exhaustion events"},
     {"lasso_admission_rejections_total", :counter,
@@ -50,7 +48,6 @@ defmodule Lasso.Observability.PrometheusMetrics do
     {"lasso_circuit_transitions_total", :counter, "Circuit transitions by bounded reason"},
     {"lasso_circuit_failures_total", :counter, "Circuit failures by bounded category"},
     {"lasso_circuit_recovery_attempts_total", :counter, "Proactive circuit recovery attempts"},
-    {"lasso_circuit_timeouts_total", :counter, "Circuit request timeouts"},
     {"lasso_websocket_connections_total", :counter,
      "Upstream WebSocket connection lifecycle events"},
     {"lasso_subscription_events_total", :counter,
@@ -68,15 +65,11 @@ defmodule Lasso.Observability.PrometheusMetrics do
     {"lasso_stream_budget_rejections_total", :counter, "Continuity admission rejections"},
     {"lasso_credential_health_events_total", :counter,
      "Managed upstream credential health transitions"},
-    {"lasso_http_requests_total", :counter,
-     "Completed Phoenix endpoint requests, including local and invalid requests"},
-    {"lasso_http_request_duration_seconds", :histogram, "Phoenix endpoint duration in seconds"}
   ]
   @events [
     [:lasso, :rpc, :request, :stop],
-    [:lasso, :rpc, :attempt, :stop],
+    [:lasso, :rpc, :attempt, :terminal],
     [:lasso, :rpc, :admission, :rejected],
-    [:phoenix, :endpoint, :stop],
     [:lasso, :failover, :fast_fail],
     [:lasso, :failover, :circuit_open],
     [:lasso, :failover, :degraded_mode],
@@ -86,7 +79,6 @@ defmodule Lasso.Observability.PrometheusMetrics do
     [:lasso, :circuit_breaker, :close],
     [:lasso, :circuit_breaker, :half_open],
     [:lasso, :circuit_breaker, :failure],
-    [:lasso, :circuit_breaker, :timeout],
     [:lasso, :circuit_breaker, :proactive_recovery],
     [:lasso, :websocket, :connected],
     [:lasso, :websocket, :disconnected],
@@ -132,10 +124,15 @@ defmodule Lasso.Observability.PrometheusMetrics do
     counter("lasso_rpc_failovers_total", Keyword.delete(labels, :outcome), meta[:failovers] || 0)
   end
 
-  defp observe([:lasso, :rpc, :attempt, :stop], ms, meta) do
-    labels = route_labels(meta) ++ [category: enum(meta[:error_category])]
+  defp observe([:lasso, :rpc, :attempt, :terminal], _ms, meta) do
+    labels = [
+      chain: chain(meta),
+      provider: identity(meta[:provider_id]),
+      transport: enum(meta[:transport]),
+      outcome: enum(meta[:outcome]),
+      category: enum(meta[:error_category])
+    ]
     counter("lasso_upstream_attempts_total", labels)
-    histogram("lasso_upstream_attempt_duration_seconds", labels, ms[:duration_ms])
   end
 
   defp observe([:lasso, :rpc, :admission, :rejected], _ms, meta) do
@@ -164,9 +161,6 @@ defmodule Lasso.Observability.PrometheusMetrics do
           "lasso_circuit_failures_total",
           labels ++ [category: enum(meta[:error_category]), state: enum(meta[:circuit_state])]
         )
-
-      :timeout ->
-        counter("lasso_circuit_timeouts_total", labels)
 
       :proactive_recovery ->
         counter("lasso_circuit_recovery_attempts_total", labels)
@@ -231,22 +225,6 @@ defmodule Lasso.Observability.PrometheusMetrics do
     )
   end
 
-  defp observe([:phoenix, :endpoint, :stop], ms, %{conn: conn}) do
-    labels = [route: http_route(conn.request_path), status: status(conn.status)]
-    counter("lasso_http_requests_total", labels)
-    duration = ms[:duration]
-
-    if is_integer(duration) and duration >= 0 do
-      histogram(
-        "lasso_http_request_duration_seconds",
-        labels,
-        System.convert_time_unit(duration, :native, :microsecond) / 1000
-      )
-    else
-      invalid()
-    end
-  end
-
   defp observe(_event, _ms, _meta), do: :ok
 
   defp basic_labels(meta) do
@@ -286,19 +264,6 @@ defmodule Lasso.Observability.PrometheusMetrics do
   defp enum(value) when is_atom(value), do: enum(Atom.to_string(value))
   defp enum(value) when value in @enums, do: value
   defp enum(_), do: "other"
-
-  defp status(value) when is_integer(value) and value >= 100 and value < 600,
-    do: "#{div(value, 100)}xx"
-
-  defp status(_), do: "unknown"
-  defp http_route("/metrics"), do: "/metrics"
-  defp http_route("/api/ready"), do: "/api/ready"
-  defp http_route("/health"), do: "/health"
-  defp http_route("/"), do: "/"
-  defp http_route("/rpc/" <> _), do: "/rpc/*"
-  defp http_route("/api/" <> _), do: "/api/*"
-  defp http_route("/ws" <> _), do: "/ws*"
-  defp http_route(_), do: "other"
 
   defp counter(name, labels, count \\ 1)
 

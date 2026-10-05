@@ -126,36 +126,14 @@ defmodule Lasso.Observability.PrometheusMetricsTest do
     assert byte_size(body) < 2_000_000
   end
 
-  test "canonical attempt outcomes include neutral and censored observations" do
-    for outcome <- [:usable_success, :service_failure, :timeout, :capacity_rejection, :cancelled] do
-      :telemetry.execute([:lasso, :rpc, :attempt, :stop], %{duration_ms: 250}, %{
-        chain_id: 1,
-        provider_id: "alchemy",
-        outcome: outcome,
-        transport: :http,
-        request_origin: :client
-      })
-    end
-
+  test "removed event sources do not create misleading series" do
+    refute [:lasso, :rpc, :attempt, :stop] in PrometheusMetrics.events()
+    refute [:phoenix, :endpoint, :stop] in PrometheusMetrics.events()
+    refute [:lasso, :circuit_breaker, :timeout] in PrometheusMetrics.events()
     body = output()
-    assert body =~ "lasso_upstream_attempts_total{"
-    assert body =~ ~s(outcome="timeout",category="unknown",le="0.25"} 1)
-    assert body =~ ~s(outcome="cancelled")
-  end
-
-  test "Phoenix native time is converted and dynamic HTTP paths are never labels" do
-    conn = Plug.Test.conn(:get, "/rpc/fastest/private-wallet") |> Plug.Conn.put_status(503)
-
-    :telemetry.execute(
-      [:phoenix, :endpoint, :stop],
-      %{duration: System.convert_time_unit(100_000, :microsecond, :native)},
-      %{conn: conn}
-    )
-
-    body = output()
-    assert body =~ ~s(route="/rpc/*",status="5xx")
-    assert value(body, "lasso_http_request_duration_seconds_sum") == 0.1
-    refute body =~ "private-wallet"
+    refute body =~ "lasso_upstream_attempt_duration_seconds"
+    refute body =~ "lasso_http_"
+    refute body =~ "lasso_circuit_timeouts_total"
   end
 
   test "stream reservations expose latest gauges and cumulative admission losses" do
@@ -176,36 +154,46 @@ defmodule Lasso.Observability.PrometheusMetricsTest do
     assert body =~ ~s(lasso_stream_memory_bytes{kind="limit"} 1000)
   end
 
-  test "canonical dispatched recorder produces one observation with route context" do
-    alias Lasso.RPC.{Channel, RequestContext, RequestOptions}
+  test "canonical projection emits failure diagnostics but not successful attempts" do
+    alias Lasso.Config.ConfigStore
+    alias Lasso.RPC.{AttemptIdentity, AttemptProjection, AttemptTerminal}
 
-    ctx = %{
-      RequestContext.new(1, "eth_getBalance", [])
-      | opts: %RequestOptions{profile: "public", request_origin: :system, timeout_ms: 1000}
-    }
+    parent = self()
+    handler = "prometheus-canonical-attempt-#{System.unique_integer([:positive])}"
+    :telemetry.attach(handler, [:lasso, :rpc, :attempt, :terminal], fn _, _, meta, _ ->
+      send(parent, {:terminal, meta})
+    end, nil)
+    on_exit(fn -> :telemetry.detach(handler) end)
 
-    channel = %Channel{
+    identity = AttemptIdentity.new(
+      request_id: "metrics-canonical-request",
+      attempt_id: "metrics-canonical-attempt",
       profile: "public",
       chain_id: 1,
-      provider_id: "recorder",
-      instance_id: "physical",
-      transport: :http
-    }
+      upstream_instance_id: "physical",
+      transport: :http,
+      route_generation: ConfigStore.route_generation(),
+      circuit_scope: :broad,
+      circuit_epoch: 1,
+      execution_safety: :replay_safe,
+      routing_intent: "default",
+      workload_key: "client",
+      request_budget_ms: 100,
+      candidate_admission_count: 1,
+      dispatch_count: 1
+    )
 
-    assert :ok =
-             Lasso.RPC.RequestPipeline.Observability.record_attempt(
-               ctx,
-               channel,
-               "physical",
-               {:ok, :value, 17}
-             )
+    success = AttemptTerminal.Response.new(identity, :success, 17_000)
+    assert {_, :not_required} = AttemptProjection.process(AttemptProjection.new(success, "recorder", "eth_call"))
+    refute_receive {:terminal, _}, 20
 
+    failure = AttemptTerminal.InvalidResponse.new(identity, :invalid_json, 17_000)
+    AttemptProjection.process(AttemptProjection.new(failure, "recorder", "eth_call"))
+    assert_receive {:terminal, %{provider_id: "recorder"}}, 1000
     body = output()
-
-    assert body =~
-             ~s(lasso_upstream_attempts_total{profile="public",chain="1",provider="recorder",method="eth_getBalance",transport="http",origin="system",outcome="usable_success",category="unknown"} 1)
-
-    assert value(body, "lasso_upstream_attempt_duration_seconds_sum") == 0.017
+    assert body =~ "lasso_upstream_attempts_total{chain=\"1\",provider=\"recorder\",transport=\"http\""
+    refute body =~ "lasso_upstream_attempt_duration_seconds"
+    refute body =~ "outcome=\"usable_success\""
   end
 
   test "scrape contains one TYPE per family and VM metrics do not require a dashboard" do

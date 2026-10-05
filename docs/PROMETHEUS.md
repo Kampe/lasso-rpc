@@ -1,8 +1,5 @@
 # Prometheus operator guide
 
-For request-level drilldown and JSON-log correlation, see the optional
-[OpenTelemetry trace guide](TRACING.md).
-
 Scrape `GET /metrics` on **each Lasso node**. Counters and histograms are node-local;
 keep the Prometheus `instance` label and sum rates across nodes when calculating
 fleet throughput. No database, dashboard session, scheduler instrumentation flag,
@@ -46,23 +43,21 @@ or subscription keys.
 | --- | --- | --- |
 | `lasso_rpc_requests_total` | Existing compatible routed completion count | chain, provider, method, outcome |
 | `lasso_rpc_request_duration_seconds` | Final routed latency, including attempts/failover | profile, chain, provider, method, transport, origin, outcome |
-| `lasso_upstream_attempts_total` | Every dispatched upstream attempt | same route labels plus error category |
-| `lasso_upstream_attempt_duration_seconds` | Exact I/O or censored timeout/cancellation boundary | route labels, category, outcome |
+| `lasso_upstream_attempts_total` | Non-success dispatched attempt diagnostics only | chain, provider, transport, outcome, category |
 | `lasso_rpc_failovers_total` | Sum of failovers recorded at final completion | route labels without outcome |
 | `lasso_admission_rejections_total` | Candidate rejected before dispatch | route labels, bounded reason |
 | `lasso_failover_events_total` | Skip, fast-fail, degraded recovery or exhaustion events | route labels, kind |
-| `lasso_http_requests_total` / `lasso_http_request_duration_seconds` | Completed Phoenix endpoint requests including validation/local handling | normalized route, HTTP status class |
 | `lasso_circuit_state` | Existing one-hot local HTTP/WS circuit state | profile, chain, provider, transport, state |
 | `lasso_circuit_ready` / `lasso_circuit_failures` | Owner admission readiness and consecutive failures | profile, chain, provider, transport |
 | `lasso_circuit_half_open_capacity` / `lasso_circuit_half_open_inflight` | Recovery probe slots and occupancy | profile, chain, provider, transport |
 | `lasso_circuit_recovery_delay_seconds` | Remaining local monotonic recovery delay | profile, chain, provider, transport |
 | `lasso_circuit_transitions_total` / `lasso_circuit_failures_total` | Physical-instance transition/failure evidence | instance_id, transport, state, reason/category |
-| `lasso_circuit_timeouts_total` / `lasso_circuit_recovery_attempts_total` | Timeouts and proactive recovery attempts | instance_id, transport |
+| `lasso_circuit_recovery_attempts_total` | Proactive recovery attempts | instance_id, transport |
 | `lasso_chain_ready` / `lasso_chain_eligible_upstreams` | Same node-local HTTP readiness as `/api/ready` and eligible alternatives | profile, chain |
 | `lasso_provider_info` | Configured route to physical-instance mapping | profile, chain, provider, instance_id |
 | `lasso_provider_transport_configured` | Whether HTTP/WS is configured | profile, chain, provider, transport |
 | `lasso_provider_head_observed` | Fresh head-lag evidence exists (1/0) | profile, chain, provider |
-| `lasso_provider_head_lag_blocks` | Existing fresh head lag in blocks | profile, chain, provider |
+| `lasso_provider_head_lag_blocks` | Chain-wide compatibility lag in blocks; not scoped routing-policy evidence | profile, chain, provider |
 | `lasso_websocket_connections_total` | Connection/disconnection events; not active subscriptions | profile, chain, provider, event |
 | `lasso_subscription_events_total` / `lasso_subscription_recovery_duration_seconds` | Failover, reorg repair, drops and slow-consumer termination | available profile/chain/provider, kind/reason |
 | `lasso_stream_budget_bytes` / `_messages` / `_owners` | Continuity reservations and queued deliveries | kind where applicable |
@@ -76,21 +71,28 @@ or subscription keys.
 
 `*_seconds` histograms export `_bucket`, `_sum`, and `_count`. Boundaries are
 5, 10, 25, 50, 100, 250, 500 ms; 1, 2.5, 5, 10, 30 seconds; and +Inf. Routed
-telemetry durations are **milliseconds**; Phoenix durations are native monotonic
-units. The observer explicitly converts both to seconds. Negative/missing durations
+telemetry durations are **milliseconds**. The observer converts them to seconds. Negative/missing durations
 increment `lasso_observer_invalid_total`; they never fabricate zero latency.
 
-Attempt outcomes distinguish `usable_success`, `service_failure`, `timeout`,
-`capacity_rejection`, `neutral_error`, and `cancelled`. An attempt failure can be
-recovered by another provider: it is not automatically a failed client request.
-Timeout/cancellation durations are censored boundaries, not successful latency;
-compare provider speed using `outcome="usable_success"`.
+Attempt counters observe `[:lasso, :rpc, :attempt, :terminal]` from the canonical
+AttemptProjection path. It emits non-success dispatched diagnostics (failures,
+cancellations and policy rejections), not successful attempts. It does not supply
+profile, method or origin. Attempt panels do not apply those filters. There is no
+successful-attempt latency metric or HTTP ingress metric in this exporter.
+An attempt failure may be recovered by another provider; it is not automatically
+a failed client request. Diagnostic delivery is bounded and can drop observations.
 
-Routed completions are not all HTTP ingress: invalid requests, locally handled
-methods and pre-dispatch errors have different paths. One HTTP batch can contain
-multiple routed calls. HTTP metrics count completed endpoint requests, not active
-connections. Counter events retain `unknown` context when a legacy emitter lacks
-profile/method/origin; never assume a missing origin was a client request.
+Request counters, latency and completion-reported failovers consume request
+**diagnostics**, not exact execution counts. RequestAggregate samples successful
+detail above 256 completions/s per profile, chain and origin; failures remain
+admitted. This biases throughput, success ratios, latency and failovers under
+load. Observer drop counters measure observer admission losses, not upstream
+sampling or dispatcher drops. Do not use these series as exact load/SLO accounting.
+Exact scrape-time request counters are a separate upstream follow-up.
+
+The head-lag gauge compares chain-wide observations. Routing uses transport-specific
+head scope and freshness; never compare this compatibility gauge with max_lag_blocks
+to decide routing eligibility. Scope-aware head lag is a separate upstream follow-up.
 
 A fresh head observation does not prove routing eligibility: identity, circuit,
 method capability, lag policy and request range must still permit dispatch.
@@ -110,9 +112,9 @@ A still-open circuit is reduced redundancy even when client service is healthy.
 
 ### Latency climbs under load
 
-Compare final p95/p99 with successful attempt p95. If both climb, inspect upstream
-speed and quotas. If final latency climbs while individual attempts stay fast,
-check failovers, admission rejections, run queue, memory, and ingress status classes.
+Inspect sampled final p95/p99, non-success attempt diagnostics, failovers,
+admission rejections, run queue and memory. Inspect upstream logs to compare
+provider speed; successful-attempt latency is not exported.
 Quantiles must sum histogram buckets before `histogram_quantile`; do not average
 per-node p95 values. Use a rate window spanning several scrape intervals.
 

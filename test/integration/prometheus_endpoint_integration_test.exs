@@ -3,6 +3,8 @@ defmodule Lasso.PrometheusEndpointIntegrationTest do
 
   @moduletag :integration
 
+  require Lasso.Test.Eventually
+
   alias Lasso.Observability.Prometheus
 
   test "a real HTTP scrape exposes bounded request and current route evidence", %{chain: chain} do
@@ -64,5 +66,31 @@ defmodule Lasso.PrometheusEndpointIntegrationTest do
 
     refute body =~ "unbounded_user_method_#{chain}"
     assert Prometheus.stats().series <= 4_096
+  end
+
+  test "routed provider failures reach the canonical attempt counter", %{chain: chain} do
+    setup_providers([
+      %{id: "canonical_failure", priority: 10, behavior: :always_fail, profile: "public"}
+    ])
+
+    assert {:error, _, _} =
+             RequestPipeline.execute_via_channels(
+               chain,
+               "eth_blockNumber",
+               [],
+               %RequestOptions{
+                 profile: "public",
+                 provider_override: "canonical_failure",
+                 failover_on_override: false,
+                 strategy: :priority,
+                 timeout_ms: 1000,
+                 request_id: "metrics-canonical-failure"
+               }
+             )
+
+    Lasso.Test.Eventually.assert_eventually(fn ->
+      Prometheus.scrape() =~
+        ~s(lasso_upstream_attempts_total{chain="#{chain}",provider="canonical_failure",transport="http")
+    end)
   end
 end

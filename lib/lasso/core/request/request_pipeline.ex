@@ -128,9 +128,7 @@ defmodule Lasso.RPC.RequestPipeline do
     caller_guard = ExecutionScope.open(execution_scope)
 
     try do
-      Lasso.Observability.Tracing.request(chain_id, method, opts, fn ->
-        execute_owned_request(execution_scope, caller_guard, chain_id, method, params, opts)
-      end)
+      execute_owned_request(execution_scope, caller_guard, chain_id, method, params, opts)
     after
       ExecutionScope.close(caller_guard)
     end
@@ -776,19 +774,17 @@ defmodule Lasso.RPC.RequestPipeline do
     timeout_ms = max(div(attempt_deadline_us - System.monotonic_time(:microsecond), 1_000), 1)
 
     outcome =
-      Lasso.Observability.Tracing.attempt(channel, ctx, fn ->
-        RequestOwner.execute(
+      RequestOwner.execute(
+        identity,
+        attempt_deadline_us,
+        build_transport_task(channel, prepared_request, timeout_ms)
+        |> Lasso.BlockSync.ClientObservation.wrap(
+          prepared_request,
           identity,
-          attempt_deadline_us,
-          build_transport_task(channel, prepared_request, timeout_ms)
-          |> Lasso.BlockSync.ClientObservation.wrap(
-            prepared_request,
-            identity,
-            ctx.opts.request_origin
-          ),
-          caller_guard_options(caller_guard)
-        )
-      end)
+          ctx.opts.request_origin
+        ),
+        caller_guard_options(caller_guard)
+      )
 
     {decision, ctx} = qualify_response(outcome, ctx)
 

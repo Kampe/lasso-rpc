@@ -91,23 +91,21 @@ defmodule Lasso.Core.Request.RequestOwner do
   end
 
   defp start_transport_task(context, fun) do
-    Task.async(
-      Lasso.Observability.Tracing.wrap(fn ->
-        :ok = AttemptProtocol.install_context(context)
+    Task.async(fn ->
+      :ok = AttemptProtocol.install_context(context)
 
-        try do
-          result = fun.()
+      try do
+        result = fun.()
 
-          %AttemptCompletion{
-            result: result,
-            terminal_candidate: AttemptProtocol.take_terminal_candidate(context),
-            completed_at_us: System.monotonic_time(:microsecond)
-          }
-        after
-          AttemptProtocol.clear_context()
-        end
-      end)
-    )
+        %AttemptCompletion{
+          result: result,
+          terminal_candidate: AttemptProtocol.take_terminal_candidate(context),
+          completed_at_us: System.monotonic_time(:microsecond)
+        }
+      after
+        AttemptProtocol.clear_context()
+      end
+    end)
   end
 
   defp await_terminal(state) do

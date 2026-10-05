@@ -4,10 +4,6 @@ Lasso exposes dashboard measurements, opt-in JSON-RPC response metadata, BEAM
 telemetry events, and operational logs. These signals describe different units:
 a client request can produce several upstream attempts during failover.
 
-Optional [OpenTelemetry tracing](TRACING.md) adds HTTP, routed-request and
-upstream-attempt spans, W3C propagation across workers and JSON-log correlation.
-It is disabled by default; metrics and JSON logs do not require a collector.
-
 ## Dashboard and metrics API
 
 The dashboard shows provider connectivity, circuit state, block freshness,
@@ -19,9 +15,11 @@ observations display as unavailable rather than a measured zero.
 `public` profile. It is a JSON endpoint. See [API Reference](API_REFERENCE.md#non-rpc-api-endpoints)
 for its fields and units.
 
-`GET /metrics` exposes bounded node-local routed completion and upstream-attempt
-latency histograms, failover/admission events, circuit state and recovery,
-head evidence, WebSocket continuity budgets, HTTP ingress and BEAM pressure.
+`GET /metrics` exposes bounded sampled routed-completion latency histograms,
+non-success attempt diagnostics, failover/admission events, circuit recovery,
+chain-wide head evidence, WebSocket continuity budgets and BEAM pressure.
+Successful request diagnostics sample above 256/s per profile, chain and origin;
+these are observation rates, not exact request counts.
 Existing request/circuit/head metric names remain compatible.
 
 Import [Lasso — Operator Overview](grafana/lasso-core-v1.json) into Grafana.
