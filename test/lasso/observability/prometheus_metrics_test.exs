@@ -160,38 +160,53 @@ defmodule Lasso.Observability.PrometheusMetricsTest do
 
     parent = self()
     handler = "prometheus-canonical-attempt-#{System.unique_integer([:positive])}"
-    :telemetry.attach(handler, [:lasso, :rpc, :attempt, :terminal], fn _, _, meta, _ ->
-      send(parent, {:terminal, meta})
-    end, nil)
-    on_exit(fn -> :telemetry.detach(handler) end)
 
-    identity = AttemptIdentity.new(
-      request_id: "metrics-canonical-request",
-      attempt_id: "metrics-canonical-attempt",
-      profile: "public",
-      chain_id: 1,
-      upstream_instance_id: "physical",
-      transport: :http,
-      route_generation: ConfigStore.route_generation(),
-      circuit_scope: :broad,
-      circuit_epoch: 1,
-      execution_safety: :replay_safe,
-      routing_intent: "default",
-      workload_key: "client",
-      request_budget_ms: 100,
-      candidate_admission_count: 1,
-      dispatch_count: 1
+    :telemetry.attach(
+      handler,
+      [:lasso, :rpc, :attempt, :terminal],
+      fn _, _, meta, _ ->
+        send(parent, {:terminal, meta})
+      end,
+      nil
     )
 
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    identity =
+      AttemptIdentity.new(
+        request_id: "metrics-canonical-request",
+        attempt_id: "metrics-canonical-attempt",
+        profile: "public",
+        chain_id: 1,
+        upstream_instance_id: "physical",
+        transport: :http,
+        route_generation: ConfigStore.route_generation(),
+        circuit_scope: :broad,
+        circuit_epoch: 1,
+        execution_safety: :replay_safe,
+        routing_intent: "default",
+        workload_key: "client",
+        request_budget_ms: 100,
+        candidate_admission_count: 1,
+        dispatch_count: 1
+      )
+
     success = AttemptTerminal.Response.new(identity, :success, 17_000)
-    assert {_, :not_required} = AttemptProjection.process(AttemptProjection.new(success, "recorder", "eth_call"))
+
+    assert {_, :not_required} =
+             AttemptProjection.process(AttemptProjection.new(success, "recorder", "eth_call"))
+
     refute_receive {:terminal, _}, 20
 
     failure = AttemptTerminal.InvalidResponse.new(identity, :invalid_json, 17_000)
     AttemptProjection.process(AttemptProjection.new(failure, "recorder", "eth_call"))
     assert_receive {:terminal, %{provider_id: "recorder"}}, 1000
     body = output()
-    assert body =~ "lasso_upstream_attempts_total{chain=\"1\",provider=\"recorder\",transport=\"http\""
+
+    assert body =~
+             "lasso_upstream_attempts_total{chain=\"1\",provider=\"recorder\",transport=\"http\""
+
+    assert body =~ ~s(outcome="service_failure",category="protocol_error")
     refute body =~ "lasso_upstream_attempt_duration_seconds"
     refute body =~ "outcome=\"usable_success\""
   end

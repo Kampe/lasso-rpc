@@ -26,7 +26,7 @@ defmodule Lasso.Observability.PrometheusMetrics do
     rate_limit authentication authorization server_error network_error connection_error
     block_not_available capability_violation method_not_found method_error auth_error
     chain_error invalid_params parse_error user_error client_error execution_revert
-    provider_error unknown_error unclassified_server_error
+    provider_error provider_failure protocol_error unknown_error unclassified_server_error
     internal_error invalid_request unsupported_method local_capacity_rejection
     circuit_open deadline_exceeded healthy degraded exhausted admission_rejected
     fast_fail degraded_mode degraded_success exhaustion initiated resubscribe_initiated
@@ -64,7 +64,7 @@ defmodule Lasso.Observability.PrometheusMetrics do
     {"lasso_stream_memory_bytes", :gauge, "Combined stream reservations and configured limit"},
     {"lasso_stream_budget_rejections_total", :counter, "Continuity admission rejections"},
     {"lasso_credential_health_events_total", :counter,
-     "Managed upstream credential health transitions"},
+     "Managed upstream credential health transitions"}
   ]
   @events [
     [:lasso, :rpc, :request, :stop],
@@ -132,6 +132,7 @@ defmodule Lasso.Observability.PrometheusMetrics do
       outcome: enum(meta[:outcome]),
       category: enum(meta[:error_category])
     ]
+
     counter("lasso_upstream_attempts_total", labels)
   end
 
