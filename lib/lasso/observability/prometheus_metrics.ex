@@ -36,7 +36,8 @@ defmodule Lasso.Observability.PrometheusMetrics do
     stream_bytes delivery_bytes delivery_messages
     node_limit stream_limit client_limit client_message_limit budget_unavailable
     event_buffer_overflow event_too_large invalid_header invalid_log stale_provider
-    message_limit released active recovered
+    message_limit mailbox_limit owner_messages owner_bytes node_capacity contention recipient_down
+    released active recovered
     critical warning available unavailable not_found)
 
   @route_labels [:profile, :chain, :provider, :method, :transport, :origin, :outcome]

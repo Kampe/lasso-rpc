@@ -262,6 +262,63 @@ defmodule Lasso.Observability.PrometheusMetricsTest do
     end
   end
 
+  test "coordinator dispatch reports real ingress rejection reasons" do
+    alias Lasso.Core.Streaming.{ClientSubscriptionRegistry, Ingress, StreamCoordinator}
+
+    registry = start_supervised!({ClientSubscriptionRegistry, {"public", 42_424}})
+
+    pid =
+      start_supervised!(
+        {StreamCoordinator, {"public", 42_424, {:newHeads}, [primary_provider_id: "drpc"]}}
+      )
+
+    tokens =
+      for _ <- 1..Ingress.stats().owner_messages do
+        {:ok, token} = Ingress.reserve(:lasso_stream_ingress, registry, 256)
+        token
+      end
+
+    try do
+      GenServer.cast(
+        pid,
+        {:upstream_event, "drpc", "sub",
+         %{"number" => "0x1", "hash" => "0x1", "parentHash" => "0x0"}, 0}
+      )
+
+      :sys.get_state(pid)
+      assert output() =~ ~s(reason="owner_messages")
+    after
+      Enum.each(tokens, &Ingress.release/1)
+    end
+
+    missing =
+      start_supervised!(
+        Supervisor.child_spec(
+          {StreamCoordinator, {"public", 42_425, {:newHeads}, [primary_provider_id: "drpc"]}},
+          id: :metrics_missing_registry
+        )
+      )
+
+    GenServer.cast(
+      missing,
+      {:upstream_event, "drpc", "sub",
+       %{"number" => "0x1", "hash" => "0x1", "parentHash" => "0x0"}, 0}
+    )
+
+    :sys.get_state(missing)
+    assert output() =~ ~s(reason="recipient_down")
+
+    for reason <- [:owner_bytes, :node_capacity, :contention, :mailbox_limit] do
+      :telemetry.execute([:lasso, :stream, :continuity_resource_exhausted], %{count: 1}, %{
+        profile: "public",
+        chain_id: 1,
+        reason: reason
+      })
+
+      assert output() =~ ~s(reason="#{reason}")
+    end
+  end
+
   test "zero failovers retain completed request evidence without inventing a counter" do
     request(10)
     body = output()
