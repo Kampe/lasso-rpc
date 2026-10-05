@@ -8,6 +8,7 @@ defmodule Lasso.Observability.Tracing do
 
   require OpenTelemetry.Tracer, as: Tracer
 
+  alias Lasso.RPC.BoundedIdentifier
   alias OpenTelemetry.{Ctx, Span}
 
   @methods ~w(eth_blockNumber eth_call eth_chainId eth_estimateGas eth_feeHistory
@@ -183,7 +184,7 @@ defmodule Lasso.Observability.Tracing do
     Tracer.set_status(:error, "rpc_error")
   end
 
-  defp identity(value) when is_binary(value), do: String.slice(value, 0, 64)
+  defp identity(value) when is_binary(value), do: BoundedIdentifier.encode(value)
   defp identity(_), do: "unknown"
   defp method_name(value) when value in @methods, do: value
   defp method_name(_), do: "other"

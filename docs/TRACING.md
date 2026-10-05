@@ -53,7 +53,8 @@ Providers must support tracing to extend the tree beyond the attempt.
 WebSocket ordinary RPC items get request/attempt spans but independent roots:
 JSON-RPC messages do not have standard HTTP trace headers. No long-lived socket
 or per-notification span is created. Subscription establishment, recovery and
-delivery pressure remain visible in Prometheus and operational logs.
+delivery pressure remain visible in operational logs. Prometheus subscription
+and continuity metrics are provided separately by PR #297.
 
 HTTP spans start after body parsing and end when routing returns; no HTTP
 ingress histogram is provided by this tracing change. Health, metrics and
@@ -115,6 +116,10 @@ In Grafana Explore, select your Tempo datasource and search with TraceQL:
 ```
 
 Add `span.lasso.chain_id = 1` or `span.lasso.provider = "provider_id"` as needed.
+Profile and provider attributes use the canonical `BoundedIdentifier` encoding:
+valid UTF-8 IDs up to 128 bytes remain unchanged; longer IDs use a `sha256:`
+fingerprint. Use the same encoded identity when correlating traces and metrics.
+
 Compare total `lasso.rpc` duration with individual `lasso.upstream` attempts.
 A failed attempt followed by a successful request shows recovered failover;
 a failed request span shows exhausted/local failure. Use Prometheus alongside traces; existing request diagnostics can sample
@@ -130,13 +135,26 @@ IDs to Loki stream labels or Prometheus labels.
 The SDK uses a batch processor, default 2,048-span queue and 10-second export
 timeout. Export runs outside request workers: collector failure does not delay
 or change RPC results. This is best-effort telemetry; spans can be dropped
-under pressure or on shutdown. The queue bounds finished spans, not total VM
-memory or all in-flight spans. Tune standard `OTEL_BSP_MAX_QUEUE_SIZE`,
+under pressure or on shutdown. The queue size is a best-effort threshold checked
+once per second, not an insertion cap; bursts can temporarily exceed it. It does
+not bound total VM memory or active spans. Tune standard `OTEL_BSP_MAX_QUEUE_SIZE`,
 `OTEL_BSP_SCHEDULE_DELAY_MILLIS` and `OTEL_BSP_EXPORT_TIMEOUT_MILLIS` variables.
 The SDK may flush synchronously during application shutdown and delay exit
 after Lasso has stopped. Its batch export timeout does not guard that synchronous
 shutdown flush; allow for graceful shutdown and verify the chosen exporter's
 behavior when sizing the pod's termination grace period.
+
+Active spans use the SDK sweeper: it checks every second, normally ends spans
+older than 60 seconds, and marks them with `finished_by_sweeper`. This reclaims
+spans abandoned when an owner is forcibly killed. The storage watermark is
+8 MiB of active-span ETS memory. Above it, the SDK reduces the TTL to 6 seconds;
+at twice the watermark, it drops the active span table. These periodic checks
+are best-effort safeguards, not hard memory caps. Both the TTL and overload
+policy can end live traces; they do not cancel RPC work.
+
+Tune `OTEL_SPAN_SWEEPER_INTERVAL`, `OTEL_SPAN_SWEEPER_SPAN_TTL` (milliseconds),
+`OTEL_SPAN_SWEEPER_STORAGE_SIZE` (bytes) and `OTEL_SPAN_SWEEPER_STRATEGY`.
+Choose the TTL above the longest request duration whose complete trace you need.
 
 If traces disappear, check the Lasso flag, `OTEL_SDK_DISABLED`, receiver
 address/protocol/authentication, sampler and collector export/drop metrics.
@@ -147,10 +165,7 @@ The collector and trace backend are never required for routing/readiness.
 
 ## Disabled-path overhead
 
-The earlier 0.39 microsecond helper measurement included repeated application
-configuration lookups and benchmark work. The flag now uses a startup-cached
-persistent_term value. Disabled helpers invoke the original callback without
-context capture, header mutation, logger metadata work or span creation.
-A seven-run median over 200,000 synthetic request-plus-attempt helper calls
-measured 7.5 ns baseline and 43.1 ns disabled, adding 35.6 ns. This measures
-helper overhead on the validation VM, not end-to-end production throughput.
+The enable flag uses a startup-cached persistent_term value. Disabled helpers
+invoke the original callback without configuration lookups, context capture,
+header mutation, logger metadata work or span creation. The regression tests
+check callback identity and unchanged results, headers, context and metadata.

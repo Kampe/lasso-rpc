@@ -1,11 +1,17 @@
 import Config
 
-# Traces are opt-in. Standard OTEL_* variables can tune these bounded defaults.
+# Traces are opt-in. Standard OTEL_* variables can tune these defaults.
 config :opentelemetry,
   sampler: {:parent_based, %{root: {:trace_id_ratio_based, 0.01}}},
   span_processor: :batch,
   bsp_max_queue_size: 2_048,
   bsp_exporting_timeout_ms: 10_000,
+  sweeper: %{
+    interval: 1_000,
+    span_ttl: 60_000,
+    storage_size: 8 * 1_024 * 1_024,
+    strategy: :failed_attribute_and_end_span
+  },
   attribute_value_length_limit: 128,
   resource: %{"service.name" => "lasso"},
   text_map_propagators: [:trace_context]

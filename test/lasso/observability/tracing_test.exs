@@ -7,7 +7,7 @@ defmodule Lasso.Observability.TracingTest do
   alias Lasso.Observability.Tracing
   alias Lasso.RPC.RequestOptions
   alias LassoWeb.RPCController.BatchExecutor
-  alias OpenTelemetry.Ctx
+  alias OpenTelemetry.{Ctx, Span}
 
   Record.defrecordp(:span, Record.extract(:span, from_lib: "opentelemetry/include/otel_span.hrl"))
 
@@ -205,6 +205,94 @@ defmodule Lasso.Observability.TracingTest do
     refute inspect(record) =~ "private-wallet-method"
     assert Ctx.get_current() == state.context
     assert Logger.metadata() == state.metadata
+  end
+
+  test "SDK sweeper reclaims request and attempt spans after batch owner is killed" do
+    parent = self()
+    deadline = System.monotonic_time(:microsecond) + 500_000
+
+    batch =
+      BatchExecutor.run([%{index: 0, deadline_us: deadline}], fn _item, _scope ->
+        Tracing.request(1, "eth_call", opts(), fn ->
+          request_id = Span.span_id(Tracer.current_span_ctx())
+          ctx = %{chain_id: 1, method: "eth_call", opts: opts()}
+
+          Tracing.attempt(%{provider_id: "provider", transport: :http}, ctx, fn ->
+            send(
+              parent,
+              {:abandoned, self(), request_id, Span.span_id(Tracer.current_span_ctx())}
+            )
+
+            Process.sleep(:infinity)
+          end)
+        end)
+      end)
+
+    assert batch.counters.owner_unresponsive == 1
+    assert_receive {:abandoned, owner, request_id, attempt_id}
+    monitor = Process.monitor(owner)
+    assert_receive {:DOWN, ^monitor, :process, ^owner, _}
+    refute Process.alive?(owner)
+    sweeper = Application.fetch_env!(:opentelemetry, :sweeper)
+    assert sweeper.interval == 1_000
+    assert sweeper.storage_size == 8 * 1_024 * 1_024
+    assert sweeper.strategy == :failed_attribute_and_end_span
+
+    # Advance only these abandoned spans past the configured TTL.
+    for id <- [request_id, attempt_id] do
+      assert [record] = :ets.lookup(:otel_span_table, id)
+
+      expired =
+        System.monotonic_time() -
+          System.convert_time_unit(sweeper.span_ttl + 1, :millisecond, :native)
+
+      :ets.insert(:otel_span_table, span(record, start_time: expired))
+    end
+
+    Lasso.Test.Eventually.assert_eventually(
+      fn ->
+        Enum.all?([request_id, attempt_id], &(:ets.lookup(:otel_span_table, &1) == []))
+      end,
+      timeout: 3_000
+    )
+
+    records = completed(2)
+
+    assert Enum.sort(Enum.map(records, &span(&1, :span_id))) ==
+             Enum.sort([request_id, attempt_id])
+
+    assert Enum.all?(records, &(attributes(&1)["finished_by_sweeper"] == true))
+  end
+
+  test "route identities match canonical metrics without truncating distinct providers" do
+    alias Lasso.RPC.BoundedIdentifier
+    profile = String.duplicate("p", 129)
+    request_opts = %RequestOptions{profile: profile, timeout_ms: 1_000}
+    providers = for suffix <- ["first", "second"], do: String.duplicate("a", 64) <> suffix
+
+    Tracing.request(1, "eth_call", request_opts, fn ->
+      ctx = %{chain_id: 1, method: "eth_call", opts: request_opts}
+
+      for provider <- providers do
+        Tracing.attempt(%{provider_id: provider, transport: :http}, ctx, fn ->
+          %{projection: %{diagnostic: :upstream_success}}
+        end)
+      end
+
+      result()
+    end)
+
+    records = completed(3)
+
+    assert Enum.all?(
+             records,
+             &(attributes(&1)["lasso.profile"] == BoundedIdentifier.encode(profile))
+           )
+
+    attempts = Enum.filter(records, &(span(&1, :name) == "lasso.upstream"))
+
+    assert Enum.sort(Enum.map(attempts, &attributes(&1)["lasso.provider"])) ==
+             Enum.sort(providers)
   end
 
   test "invalid and duplicate incoming traceparents safely start new roots" do
