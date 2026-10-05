@@ -253,7 +253,7 @@ defmodule Lasso.Observability.PrometheusMetrics do
   defp instance_identity(value) when is_binary(value), do: value
   defp instance_identity(_), do: "unknown"
 
-  defp identity(value) when is_binary(value), do: String.slice(value, 0, 64)
+  defp identity(value) when is_binary(value), do: value
   defp identity(_), do: "unknown"
   defp method(value) when value in @methods, do: value
   defp method(_), do: "other"

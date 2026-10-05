@@ -233,6 +233,46 @@ defmodule Lasso.Observability.PrometheusMetricsTest do
     assert PrometheusMetrics.stats().series == 8
   end
 
+  test "long configured route labels match gauges and stay separate in both exporters" do
+    profile = String.duplicate("p", 64) <> "public"
+    providers = for suffix <- ["first", "second"], do: String.duplicate("a", 64) <> suffix
+
+    for provider <- providers do
+      request(10, %{profile: profile, provider_id: provider})
+
+      :telemetry.execute([:lasso, :rpc, :attempt, :terminal], %{}, %{
+        chain_id: 1,
+        provider_id: provider,
+        transport: :http,
+        outcome: :service_failure,
+        error_category: :network_error
+      })
+
+      body = output()
+      assert body =~ ~s(profile="#{profile}",chain="1",provider="#{provider}")
+      assert body =~ ~s(lasso_upstream_attempts_total{chain="1",provider="#{provider}")
+
+      legacy =
+        Prometheus.scrape()
+        |> String.split("\n")
+        |> Enum.filter(&String.starts_with?(&1, "lasso_rpc_requests_total{"))
+
+      assert Enum.any?(
+               legacy,
+               &(String.contains?(&1, ~s(provider="#{provider}")) and
+                   String.ends_with?(&1, " 1"))
+             )
+
+      mapping =
+        PrometheusRuntime.route_samples(profile, 1, provider, nil, false)
+        |> Enum.join("\n")
+
+      assert mapping =~ ~s(profile="#{profile}",chain="1",provider="#{provider}")
+    end
+
+    assert PrometheusMetrics.stats().series == 4
+  end
+
   test "real continuity admissions retain rejection kinds and reasons" do
     alias Lasso.Core.Streaming.ContinuityBudget
 

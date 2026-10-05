@@ -73,6 +73,19 @@ TESTS.append(case("long credential-distinct physical instances stay separate", [
                                    for id, rate in zip(LONG_IDS, [1, 2])]))
 
 
+LONG_PROVIDER = "a" * 64 + "first"
+LONG_PROFILE = "p" * 64 + "public"
+LONG_ROUTE = ROUTE | dict(provider=LONG_PROVIDER, profile=LONG_PROFILE)
+TESTS.extend([
+    case("long configured route filters retain completions", [
+        series("lasso_rpc_request_duration_seconds_count", LONG_ROUTE | dict(outcome="success"), "0+60x5")
+    ], expression(12, provider=LONG_PROVIDER, profile=LONG_PROFILE), [sample("{}", 0)]),
+    case("long route mapping selects physical connection", [WS,
+        series("lasso_provider_info", PHYSICAL | dict(provider=LONG_PROVIDER, profile=LONG_PROFILE), "1+0x5")
+    ], expression(22, provider=LONG_PROVIDER, profile=LONG_PROFILE), WS_SAMPLE),
+])
+
+
 def main():
     promtool = sys.argv[1] if len(sys.argv) > 1 else "promtool"
     with tempfile.TemporaryDirectory(prefix="lasso-promql-") as directory:

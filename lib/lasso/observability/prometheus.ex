@@ -283,7 +283,7 @@ defmodule Lasso.Observability.Prometheus do
 
   defp circuit_state(_id, _transport), do: :unknown
 
-  defp provider_label(provider) when is_binary(provider), do: String.slice(provider, 0, 64)
+  defp provider_label(provider) when is_binary(provider), do: provider
   defp provider_label(_provider), do: "unknown"
   defp method_label(method) when method in @methods, do: method
   defp method_label(_method), do: "other"

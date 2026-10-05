@@ -153,9 +153,9 @@ series. Runtime metrics have fixed dimensions; route gauges inspect at most 2,04
 configured routes and 2,048 profile/chains (including chains with no providers).
 `lasso_observer_route_scan_truncated` and `lasso_observer_chain_scan_truncated`
 report when the configuration exceeds these bounded scans. Capacity saturation or probe collisions increase
-`lasso_observer_dropped_total`; existing rows continue to update. Provider/profile
-route identities are truncated to 64 characters. Physical instance IDs retain
-their full value so credential-distinct upstreams remain separate and match
+`lasso_observer_dropped_total`; existing rows continue to update.
+Configured profile, provider and physical instance IDs retain their full values
+so distinct routes and credential-distinct upstreams remain separate and match
 `lasso_provider_info`. Method and reason dimensions are
 allowlisted. Do not generate per-user provider IDs.
 
