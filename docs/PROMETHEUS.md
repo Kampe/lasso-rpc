@@ -56,12 +56,12 @@ or subscription keys.
 | `lasso_provider_transport_configured` | Whether HTTP/WS is configured | profile, chain, provider, transport |
 | `lasso_provider_head_observed` | Fresh head-lag evidence exists (1/0) | profile, chain, provider |
 | `lasso_provider_head_lag_blocks` | Chain-wide compatibility lag in blocks; not scoped routing-policy evidence | profile, chain, provider |
-| `lasso_websocket_connections_total` | Physical connection/disconnection events; no active subscription count | chain, provider, event; profile is always unknown |
+| `lasso_websocket_connections_total` | Physical connection/disconnection events; no active subscription count | chain, instance_id, event; route filters use provider_info |
 | `lasso_subscription_events_total` / `lasso_subscription_recovery_duration_seconds` | Failover, reorg repair, drops and slow-consumer termination | available profile/chain/provider, kind/reason |
 | `lasso_stream_budget_bytes` / `_messages` / `_owners` | Continuity reservations and queued deliveries | kind where applicable |
 | `lasso_stream_ingress_bytes` / `_messages` / `_rejections_total` | Internal ingress reservations and cumulative losses | node-local |
 | `lasso_stream_memory_bytes` | Combined used bytes and configured reservation limit | kind=used/limit |
-| `lasso_stream_budget_rejections_total` | Continuity reservation rejection events | bounded kind/reason |
+| `lasso_stream_budget_rejections_total` | Continuity reservation rejection events | kind=stream_bytes/delivery_bytes/delivery_messages; bounded reason |
 | `lasso_credential_health_events_total` | Credential active/recovered transitions; not an active-alert gauge | provider, status |
 | `lasso_vm_*` | BEAM allocation, processes/limits, ports/limits, atoms/limits, ETS, run queue, schedulers, GC, reductions, I/O and uptime | node-local, kind/direction where applicable |
 | `lasso_build_info` | Running application/Elixir/OTP versions | version, elixir, otp |
@@ -170,3 +170,10 @@ alternatives, and a single quarantined upstream; these have different impacts.
 Failover-event and admission-rejection counters are not exported: the legacy
 sink has no production callers. Inspect circuit admission gauges and the
 sampled completion-reported failover counter instead.
+
+### Dashboard query regression checks
+
+Run `python3 scripts/check_prometheus_dashboard.py /path/to/promtool` with
+Prometheus 3.5 or newer. The check parses every dashboard expression and evaluates
+route filtering, shared physical connections, pod isolation, and zero versus
+unavailable failover evidence against fixture time series.

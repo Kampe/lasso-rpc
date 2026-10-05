@@ -32,8 +32,11 @@ defmodule Lasso.Observability.PrometheusMetrics do
     circuit_open deadline_exceeded healthy degraded exhausted admission_rejected
     fast_fail degraded_mode degraded_success exhaustion initiated resubscribe_initiated
     completed stale_head_dropped disconnected connected slow_consumer
-    continuity_resource_exhausted dropped_event orphaned_event rejected stream delivery
-    node_limit stream_limit client_limit message_limit released active recovered
+    continuity_resource_exhausted dropped_event orphaned_event rejected
+    stream_bytes delivery_bytes delivery_messages
+    node_limit stream_limit client_limit client_message_limit budget_unavailable
+    event_buffer_overflow event_too_large invalid_header invalid_log stale_provider
+    message_limit released active recovered
     critical warning available unavailable not_found)
 
   @route_labels [:profile, :chain, :provider, :method, :transport, :origin, :outcome]
@@ -150,7 +153,11 @@ defmodule Lasso.Observability.PrometheusMetrics do
   end
 
   defp observe([:lasso, :websocket, kind], _ms, meta) do
-    counter("lasso_websocket_connections_total", basic_labels(meta) ++ [event: enum(kind)])
+    counter("lasso_websocket_connections_total",
+      chain: chain(meta),
+      instance_id: identity(meta[:provider_id]),
+      event: enum(kind)
+    )
   end
 
   defp observe([:lasso, :subs, family, kind], ms, meta) do

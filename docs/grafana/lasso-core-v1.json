@@ -778,7 +778,7 @@
     {
       "id": 12,
       "title": "Failovers per completed request",
-      "description": "Uses final request failover count. More than zero can indicate successful protection with upstream degradation. Request diagnostics sample successes above 256/s per profile, chain and origin; rates, ratios, failovers and latency are observation-based and biased above that cap.",
+      "description": "Uses final request failover count. More than zero can indicate successful protection with upstream degradation. Request diagnostics sample successes above 256/s per profile, chain and origin; rates, ratios, failovers and latency are observation-based and biased above that cap. Zero appears only when completed-request evidence exists; absent completion evidence remains No data.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -793,7 +793,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(lasso_rpc_failovers_total{job=~\"$job\",instance=~\"$node\",profile=~\"$profile\",chain=~\"$chain\",provider=~\"$provider\",method=~\"$method\",origin=~\"$origin\"}[$__rate_interval])) / sum(rate(lasso_rpc_request_duration_seconds_count{job=~\"$job\",instance=~\"$node\",profile=~\"$profile\",chain=~\"$chain\",provider=~\"$provider\",method=~\"$method\",origin=~\"$origin\"}[$__rate_interval]))",
+          "expr": "(sum(rate(lasso_rpc_failovers_total{job=~\"$job\",instance=~\"$node\",profile=~\"$profile\",chain=~\"$chain\",provider=~\"$provider\",method=~\"$method\",origin=~\"$origin\"}[$__rate_interval])) or on() (0 * sum(rate(lasso_rpc_request_duration_seconds_count{job=~\"$job\",instance=~\"$node\",profile=~\"$profile\",chain=~\"$chain\",provider=~\"$provider\",method=~\"$method\",origin=~\"$origin\"}[$__rate_interval])))) / sum(rate(lasso_rpc_request_duration_seconds_count{job=~\"$job\",instance=~\"$node\",profile=~\"$profile\",chain=~\"$chain\",provider=~\"$provider\",method=~\"$method\",origin=~\"$origin\"}[$__rate_interval]))",
           "legendFormat": "{{instance}}",
           "datasource": {
             "type": "prometheus",
@@ -1170,7 +1170,7 @@
     {
       "id": 22,
       "title": "WebSocket connection churn",
-      "description": "Physical upstream connection events supply chain and provider, but no profile. The profile filter does not apply.",
+      "description": "Physical upstream connection events use instance_id. Route profile/provider filters select matching physical instances through provider_info without counting shared connections twice.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -1185,8 +1185,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by(chain,provider,event)(rate(lasso_websocket_connections_total{job=~\"$job\",instance=~\"$node\",chain=~\"$chain\",provider=~\"$provider\"}[$__rate_interval]))",
-          "legendFormat": "{{chain}} / {{provider}} / {{event}}",
+          "expr": "sum by(chain,instance_id,event)(rate(lasso_websocket_connections_total{job=~\"$job\",instance=~\"$node\",chain=~\"$chain\"}[$__rate_interval]) and on(job,instance,chain,instance_id) max by(job,instance,chain,instance_id)(lasso_provider_info{job=~\"$job\",instance=~\"$node\",chain=~\"$chain\",profile=~\"$profile\",provider=~\"$provider\"}))",
+          "legendFormat": "{{chain}} / {{instance_id}} / {{event}}",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"

@@ -163,6 +163,112 @@ defmodule Lasso.Observability.PrometheusMetricsTest do
     assert body =~ ~s(lasso_stream_memory_bytes{kind="limit"} 1000)
   end
 
+  test "shared WebSocket events expose physical instance identity" do
+    :telemetry.execute([:lasso, :websocket, :connected], %{count: 1}, %{
+      chain_id: 1,
+      provider_id: "1:drpc:7ce04b4c2a3f"
+    })
+
+    assert output() =~
+             ~s(lasso_websocket_connections_total{chain="1",instance_id="1:drpc:7ce04b4c2a3f",event="connected"} 1)
+
+    refute output() =~ ~s(provider="1:drpc:7ce04b4c2a3f")
+  end
+
+  test "real continuity admissions retain rejection kinds and reasons" do
+    alias Lasso.Core.Streaming.ContinuityBudget
+
+    budget =
+      start_supervised!(
+        {ContinuityBudget,
+         name: nil, node_limit: 100, stream_limit: 50, client_limit: 50, delivery_message_limit: 1}
+      )
+
+    assert {:error, :stream_limit} = ContinuityBudget.set_stream_bytes(budget, self(), 51)
+    assert {:error, :client_limit} = ContinuityBudget.reserve_delivery(budget, self(), 51)
+    assert :ok = ContinuityBudget.reserve_delivery(budget, self(), 1)
+    assert {:error, :client_message_limit} = ContinuityBudget.reserve_delivery(budget, self(), 1)
+    dead = spawn(fn -> :ok end)
+    monitor = Process.monitor(dead)
+    assert_receive {:DOWN, ^monitor, :process, ^dead, _}
+    assert {:error, :budget_unavailable} = ContinuityBudget.reserve_delivery(budget, dead, 1)
+
+    body = output()
+
+    for {kind, reason} <- [
+          {"stream_bytes", "stream_limit"},
+          {"delivery_bytes", "client_limit"},
+          {"delivery_messages", "client_message_limit"},
+          {"delivery_bytes", "budget_unavailable"}
+        ] do
+      assert body =~ ~s(lasso_stream_budget_rejections_total{kind="#{kind}",reason="#{reason}"} 1)
+    end
+  end
+
+  test "real coordinator drops and exhaustion keep actionable reasons" do
+    alias Lasso.Core.Streaming.StreamCoordinator
+
+    pid =
+      start_supervised!(
+        {StreamCoordinator,
+         {"public", 1, {:newHeads}, [primary_provider_id: "drpc", max_event_bytes: 1]}}
+      )
+
+    GenServer.cast(pid, {:upstream_event, "old", "sub", %{}, 0})
+    :sys.get_state(pid)
+    assert output() =~ ~s(reason="stale_provider")
+
+    GenServer.cast(
+      pid,
+      {:upstream_event, "drpc", "sub",
+       %{"number" => "0x1", "hash" => "0x1", "parentHash" => "0x0"}, 0}
+    )
+
+    :sys.get_state(pid)
+    assert output() =~ ~s(reason="event_too_large")
+
+    logs =
+      start_supervised!(
+        Supervisor.child_spec(
+          {StreamCoordinator, {"public", 1, {:logs, %{}}, [primary_provider_id: "drpc"]}},
+          id: :metrics_invalid_log
+        )
+      )
+
+    GenServer.cast(logs, {:upstream_event, "drpc", "sub", %{}, 0})
+    :sys.get_state(logs)
+    assert output() =~ ~s(reason="invalid_log")
+
+    heads =
+      start_supervised!(
+        Supervisor.child_spec(
+          {StreamCoordinator, {"public", 2, {:newHeads}, [primary_provider_id: "drpc"]}},
+          id: :metrics_invalid_header
+        )
+      )
+
+    GenServer.cast(heads, {:upstream_event, "drpc", "sub", %{}, 0})
+    :sys.get_state(heads)
+    assert output() =~ ~s(reason="invalid_header")
+
+    for reason <- [:event_buffer_overflow, :client_message_limit] do
+      :telemetry.execute([:lasso, :stream, :continuity_resource_exhausted], %{count: 1}, %{
+        profile: "public",
+        chain_id: 1,
+        reason: reason
+      })
+
+      assert output() =~ ~s(reason="#{reason}")
+    end
+  end
+
+  test "zero failovers retain completed request evidence without inventing a counter" do
+    request(10)
+    body = output()
+    assert body =~ "lasso_rpc_request_duration_seconds_count{"
+    refute body =~ "lasso_rpc_failovers_total{"
+  end
+
   test "canonical projection emits failure diagnostics but not successful attempts" do
     alias Lasso.Config.ConfigStore
     alias Lasso.RPC.{AttemptIdentity, AttemptProjection, AttemptTerminal}
