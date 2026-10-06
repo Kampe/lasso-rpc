@@ -9,6 +9,14 @@ defmodule Lasso.Integration.ZeroGapFailoverTest do
   alias Lasso.Testing.{IntegrationHelper, MockHTTPProvider, MockWSProvider}
 
   @moduletag :integration
+  @moduletag capture_log: true
+
+  setup do
+    previous_level = Logger.level()
+    Logger.configure(level: :debug)
+    on_exit(fn -> Logger.configure(level: previous_level) end)
+    :ok
+  end
 
   describe "WebSocket subscription zero-gap guarantee" do
     test "degraded exhaustion resets continuity before teardown and a new subscription starts fresh",
@@ -115,6 +123,8 @@ defmodule Lasso.Integration.ZeroGapFailoverTest do
       MockWSProvider.send_block(chain, p1_id, block(200))
       assert Enum.map(collect_blocks(1, timeout: 2_000), &extract_block_number/1) == [200]
 
+      # Delivery can precede the coordinator's final recovery acknowledgement.
+      wait_for_primary_provider(profile, chain, {:newHeads}, p1_id)
       :ok = MockWSProvider.simulate_provider_failure(chain, p1_id)
       wait_for_primary_provider(profile, chain, {:newHeads}, p2_id)
 
@@ -171,6 +181,8 @@ defmodule Lasso.Integration.ZeroGapFailoverTest do
                302
              ]
 
+      # Delivery can precede the coordinator's final recovery acknowledgement.
+      wait_for_primary_provider(profile, chain, {:newHeads}, p1_id)
       :ok = MockWSProvider.simulate_provider_failure(chain, p1_id)
       wait_for_primary_provider(profile, chain, {:newHeads}, p2_id)
 
