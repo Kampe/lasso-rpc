@@ -32,6 +32,9 @@ defmodule Lasso.Providers.InstanceState do
     control_health: :degraded
   }
 
+  defguardp active_rate_limit?(expiry, now_ms)
+            when is_integer(expiry) and expiry != 0 and expiry > now_ms
+
   @status_severity %{
     nil => 0,
     :healthy => 1,
@@ -232,7 +235,8 @@ defmodule Lasso.Providers.InstanceState do
     learned_limited? =
       case routing_state do
         %{rate_limit_expiry_ms: expiry, rate_limit_observed_at_us: observed_at_us}
-        when include_learned? and is_integer(observed_at_us) and expiry > now_ms ->
+        when include_learned? and is_integer(observed_at_us) and
+               active_rate_limit?(expiry, now_ms) ->
           true
 
         _other ->
@@ -241,7 +245,7 @@ defmodule Lasso.Providers.InstanceState do
 
     local_limited? =
       case safe_lookup({:rate_limit, instance_id, transport}) do
-        [{_, %{expiry_ms: expiry}}] when expiry > now_ms -> true
+        [{_, %{expiry_ms: expiry}}] when active_rate_limit?(expiry, now_ms) -> true
         _other -> false
       end
 
@@ -263,7 +267,8 @@ defmodule Lasso.Providers.InstanceState do
           rate_limit_expiry_ms: expiry,
           rate_limit_observed_at_us: observed_at_us
         }
-        when include_learned? and is_integer(observed_at_us) and expiry > now_ms ->
+        when include_learned? and is_integer(observed_at_us) and
+               active_rate_limit?(expiry, now_ms) ->
           [expiry]
 
         _other ->
@@ -280,7 +285,7 @@ defmodule Lasso.Providers.InstanceState do
       )
       |> Enum.flat_map(fn {key, learned?} ->
         case safe_lookup(key) do
-          [{_, %{expiry_ms: expiry} = data}] when expiry > now_ms ->
+          [{_, %{expiry_ms: expiry} = data}] when active_rate_limit?(expiry, now_ms) ->
             if not learned? or fresh_learned?(data, Keyword.get(opts, :learned_floor_us)),
               do: [expiry],
               else: []

@@ -267,6 +267,33 @@ defmodule Lasso.RPC.AttemptProjectionTest do
     assert row.consecutive_failures == 0
   end
 
+  test "client and system cooldowns preserve negative deadlines without shortening them" do
+    generation = publish_routes(["projection-client", "projection-system"])
+    observed_at_us = System.monotonic_time(:microsecond)
+    expected_expiry = div(observed_at_us, 1_000) + 10_000
+
+    for workload <- ["client", "system"] do
+      instance_id = "projection-#{workload}"
+
+      assert :ok =
+               AttemptProjection.apply_control(
+                 quota_event(observed_at_us, 10_000, instance_id, generation, workload)
+               )
+
+      assert :ok =
+               AttemptProjection.apply_control(
+                 quota_event(observed_at_us + 1_000, 1_000, instance_id, generation, workload)
+               )
+
+      scope = AttemptProjection.scope_state(@profile, @chain_id)
+      shared = AttemptProjection.route_record(scope, instance_id, :http)
+      row = AttemptProjection.route_state(scope, instance_id, :http, workload)
+      assert shared.rate_limit_expiry_ms == expected_expiry
+      assert row.rate_limit_expiry_ms == expected_expiry
+      assert row.rate_limit_retry_after_ms == 10_000
+    end
+  end
+
   test "rate-limit observations never regress and every delta is counted" do
     generation = publish_routes(["projection-instance"])
 
@@ -1146,10 +1173,10 @@ defmodule Lasso.RPC.AttemptProjectionTest do
     %{AttemptProjection.new(fact, "provider", "eth_call") | emitted_at_us: emitted_at_us}
   end
 
-  defp quota_event(emitted_at_us, retry_after_ms, instance_id, generation) do
+  defp quota_event(emitted_at_us, retry_after_ms, instance_id, generation, workload \\ "client") do
     fact =
       AttemptTerminal.Response.new(
-        identity(instance_id, generation),
+        identity(instance_id, generation, workload),
         :application_error,
         10,
         error_code: -32_005,
