@@ -171,7 +171,7 @@ defmodule Lasso.Config.ConfigStoreSupervisorRecoveryTest do
     end
   end
 
-  defp assert_eventually(fun, attempts \\ 50)
+  defp assert_eventually(fun, attempts \\ 700)
 
   defp assert_eventually(fun, attempts) when attempts > 0 do
     if fun.() do

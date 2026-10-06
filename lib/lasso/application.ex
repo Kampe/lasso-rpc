@@ -10,6 +10,8 @@ defmodule Lasso.Application do
 
   @impl true
   def start(_type, _args) do
+    Lasso.Observability.Tracing.configure(Application.get_env(:lasso, :otel_enabled, false))
+
     # Store application start time for uptime calculation
     Application.put_env(:lasso, :start_time, System.monotonic_time(:millisecond))
 
