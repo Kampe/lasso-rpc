@@ -31,9 +31,13 @@ supported by the exporter. HTTP/JSON is not supported.
 Root sampling defaults to 1%. Sampled incoming parents keep their traces;
 unsampled incoming parents stay unsampled. This works with an indexer whose
 HTTP client propagates W3C `traceparent`. Parent-based sampling does not cap
-traffic from clients that deliberately send sampled parents. For a strict
-local sampling ratio on public endpoints, use `OTEL_TRACES_SAMPLER=traceidratio`
-instead, or normalize trace context at trusted ingress. Use `always_on` for
+traffic from clients that deliberately send sampled parents. `traceidratio`
+also uses the inherited trace ID, so clients can choose IDs that always sample.
+For a local sampling policy on untrusted traffic, strip or replace incoming
+`traceparent` at trusted ingress and sample fresh server-generated roots.
+Ratio sampling remains probabilistic and is not a rate or memory cap.
+Accepted client trace IDs also appear in JSON-log `trace_id` and upstream
+`traceparent`. Use `always_on` for
 short staging investigations; it can be expensive under production load.
 
 ## Span tree and privacy
