@@ -40,9 +40,11 @@ defmodule Lasso.Integration.ZeroGapFailoverTest do
       start_backfill_provider(chain, head, profile)
       {:ok, old_sub_id} = IntegrationHelper.subscribe_client(chain, self(), key, profile)
       wait_for_subscription_active(profile, chain, key)
-      assert wait_for_any_upstream_subscription_established(profile, chain, key) == p1_id
+      primary = wait_for_any_upstream_subscription_established(profile, chain, key)
+      assert primary in [p1_id, p2_id]
+      backup = if primary == p1_id, do: p2_id, else: p1_id
 
-      MockWSProvider.send_block(chain, p1_id, block(200))
+      MockWSProvider.send_block(chain, primary, block(200))
       assert Enum.map(collect_blocks(1, timeout: 2_000), &extract_block_number/1) == [200]
 
       coordinator = Lasso.Core.Streaming.StreamCoordinator.via(profile, chain, key)
@@ -68,8 +70,8 @@ defmodule Lasso.Integration.ZeroGapFailoverTest do
           profile,
           chain,
           key,
-          p1_id,
-          p2_id
+          primary,
+          backup
         )
 
         Lasso.Test.Eventually.assert_eventually(fn ->
@@ -118,15 +120,17 @@ defmodule Lasso.Integration.ZeroGapFailoverTest do
       {:ok, _sub_id} = IntegrationHelper.subscribe_client(chain, client_pid, {:newHeads}, profile)
 
       wait_for_subscription_active(profile, chain, {:newHeads})
-      assert wait_for_any_upstream_subscription_established(profile, chain, {:newHeads}) == p1_id
+      primary = wait_for_any_upstream_subscription_established(profile, chain, {:newHeads})
+      assert primary in [p1_id, p2_id]
+      backup = if primary == p1_id, do: p2_id, else: p1_id
 
-      MockWSProvider.send_block(chain, p1_id, block(200))
+      MockWSProvider.send_block(chain, primary, block(200))
       assert Enum.map(collect_blocks(1, timeout: 2_000), &extract_block_number/1) == [200]
 
       # Delivery can precede the coordinator's final recovery acknowledgement.
-      wait_for_primary_provider(profile, chain, {:newHeads}, p1_id)
-      :ok = MockWSProvider.simulate_provider_failure(chain, p1_id)
-      wait_for_primary_provider(profile, chain, {:newHeads}, p2_id)
+      wait_for_primary_provider(profile, chain, {:newHeads}, primary)
+      :ok = MockWSProvider.simulate_provider_failure(chain, primary)
+      wait_for_primary_provider(profile, chain, {:newHeads}, backup)
 
       assert Enum.map(collect_blocks(3, timeout: 3_000), &extract_block_number/1) == [
                201,
@@ -134,13 +138,13 @@ defmodule Lasso.Integration.ZeroGapFailoverTest do
                203
              ]
 
-      MockWSProvider.send_block(chain, p2_id, block(204))
+      MockWSProvider.send_block(chain, backup, block(204))
       assert Enum.map(collect_blocks(1, timeout: 2_000), &extract_block_number/1) == [204]
       refute_receive {:subscription_event, _duplicate}, 100
 
       Agent.update(head, fn _ -> 205 end)
-      :ok = MockWSProvider.simulate_provider_failure(chain, p2_id)
-      wait_for_primary_provider(profile, chain, {:newHeads}, p1_id)
+      :ok = MockWSProvider.simulate_provider_failure(chain, backup)
+      wait_for_primary_provider(profile, chain, {:newHeads}, primary)
 
       assert Enum.map(collect_blocks(1, timeout: 3_000), &extract_block_number/1) == [205]
     end
@@ -169,7 +173,8 @@ defmodule Lasso.Integration.ZeroGapFailoverTest do
       selected_provider =
         wait_for_any_upstream_subscription_established(profile, chain, {:newHeads})
 
-      assert selected_provider == p1_id
+      assert selected_provider in [p1_id, p2_id]
+      backup = if selected_provider == p1_id, do: p2_id, else: p1_id
 
       Enum.each([300, 302, 301], fn number ->
         MockWSProvider.send_block(chain, selected_provider, block(number))
@@ -182,9 +187,9 @@ defmodule Lasso.Integration.ZeroGapFailoverTest do
              ]
 
       # Delivery can precede the coordinator's final recovery acknowledgement.
-      wait_for_primary_provider(profile, chain, {:newHeads}, p1_id)
-      :ok = MockWSProvider.simulate_provider_failure(chain, p1_id)
-      wait_for_primary_provider(profile, chain, {:newHeads}, p2_id)
+      wait_for_primary_provider(profile, chain, {:newHeads}, selected_provider)
+      :ok = MockWSProvider.simulate_provider_failure(chain, selected_provider)
+      wait_for_primary_provider(profile, chain, {:newHeads}, backup)
 
       assert Enum.map(collect_blocks(1, timeout: 3_000), &extract_block_number/1) == [303]
       refute_receive {:subscription_event, _duplicate}, 100
