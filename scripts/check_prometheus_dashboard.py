@@ -16,11 +16,11 @@ VARIABLES = dict(job="lasso", node=".*", profile="public", chain="1",
                  provider="drpc", method=".*", origin="client", __rate_interval="2m", __range="1h")
 
 
-def expression(panel, **overrides):
+def expression(panel, target=0, **overrides):
     variables = VARIABLES | overrides
     return re.sub(r"\$([A-Za-z_][A-Za-z_0-9]*)",
                   lambda match: variables.get(match[1], ".*"),
-                  PANELS[panel]["targets"][0]["expr"])
+                  PANELS[panel]["targets"][target]["expr"])
 
 
 def series(name, labels, values):
@@ -119,6 +119,62 @@ for provider in HASH_PROVIDERS:
 TESTS.append(case("hashed route mapping selects physical connection", [WS,
     series("lasso_provider_info", PHYSICAL | dict(profile=HASH_PROFILE, provider=HASH_PROVIDERS[0]), "1+0x5")
 ], expression(22, profile=HASH_PROFILE, provider=HASH_PROVIDERS[0]), WS_SAMPLE))
+
+
+EXPORTER = dict(job="lasso", instance="node-a")
+AVAILABLE = series("lasso_observer_available", EXPORTER, "1+0x5")
+SCRAPED = series("up", EXPORTER, "1+0x5")
+CHAIN = series("lasso_chain_ready", EXPORTER | dict(profile="public", chain="1"), "1+0x5")
+TESTS.extend([
+    case("All jobs ignores duplicate unrelated kubelet targets", [AVAILABLE, SCRAPED,
+        series("up", dict(job="kubelet", instance="node-b", metrics_path="/metrics"), "1+0x5"),
+        series("up", dict(job="kubelet", instance="node-b", metrics_path="/metrics/cadvisor"), "1+0x5"),
+    ], expression(2, job=".*"), [sample("{}", 1)]),
+    case("duplicate scrape labels count an exporter once", [
+        series("lasso_observer_available", EXPORTER | dict(endpoint="http"), "1+0x5"),
+        series("lasso_observer_available", EXPORTER | dict(endpoint="metrics"), "1+0x5"),
+        series("up", EXPORTER | dict(endpoint="http"), "1+0x5"),
+        series("up", EXPORTER | dict(endpoint="metrics"), "1+0x5"),
+    ], expression(2), [sample("{}", 1)]),
+    case("missing exporters remain unknown", [], expression(2), []),
+    case("failed scrape cannot supply an event baseline", [AVAILABLE,
+        series("up", EXPORTER, "0+0x5"), CHAIN,
+    ], expression(17), []),
+    case("healthy exporter with no circuit transitions", [AVAILABLE, SCRAPED],
+         expression(17), [sample('{reason="no_events",state="none"}', 0)]),
+    case("healthy selected chain with no subscription events", [AVAILABLE, SCRAPED, CHAIN],
+         expression(23), [sample('{chain="1",kind="no_events"}', 0)]),
+    case("unmatched chain cannot supply a subscription baseline", [AVAILABLE, SCRAPED, CHAIN],
+         expression(23, chain="999"), []),
+    case("healthy selected chain has no completed repairs", [AVAILABLE, SCRAPED, CHAIN],
+         expression(24), [sample('{chain="1"}', -1)]),
+    case("missing exporter cannot claim no completed repairs", [], expression(24), []),
+    case("healthy exporter with no continuity admission losses", [AVAILABLE, SCRAPED],
+         expression(27, target=1), [sample('{instance="node-a",reason="no_events"}', 0)]),
+    case("healthy exporter with no credential transitions", [AVAILABLE, SCRAPED],
+         expression(35), [sample('{provider="none",status="no_events"}', 0)]),
+    case("missing exporter cannot claim no credential transitions", [], expression(35), []),
+    case("recorded credential transitions remain visible", [AVAILABLE, SCRAPED,
+        series("lasso_credential_health_events_total", EXPORTER | dict(provider="drpc",status="failed"), "0+1x5"),
+    ], expression(35), [sample('{provider="drpc",status="failed"}', 5)]),
+])
+
+
+TESTS.extend([
+    case("unavailable observer cannot supply an event baseline", [SCRAPED,
+        series("lasso_observer_available", EXPORTER, "0+0x5"),
+    ], expression(17), []),
+    case("recorded circuit transitions suppress the no-events baseline", [AVAILABLE, SCRAPED,
+        series("lasso_circuit_transitions_total", EXPORTER | dict(state="open",reason="timeout"), "0+60x5"),
+    ], expression(17), [sample('{reason="timeout",state="open"}', 1)]),
+    case("idle repair histogram displays no completed repairs", [AVAILABLE, SCRAPED, CHAIN,
+        series("lasso_subscription_recovery_duration_seconds_bucket", EXPORTER | dict(chain="1",kind="failover",le="+Inf"), "0+0x5"),
+    ], expression(24), [sample('{chain="1"}', -1)]),
+    case("completed repair retains measured p95", [AVAILABLE, SCRAPED, CHAIN, *[
+        series("lasso_subscription_recovery_duration_seconds_bucket", EXPORTER | dict(chain="1",kind="failover",le=le), values)
+        for le,values in [("0.1","0+0x5"),("1","0+60x5"),("+Inf","0+60x5")]
+    ]], expression(24), [sample('{chain="1",kind="failover"}', 0.955)]),
+])
 
 
 def main():

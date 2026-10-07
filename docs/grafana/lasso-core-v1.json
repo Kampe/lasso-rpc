@@ -9,7 +9,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "refresh": "15s",
   "time": {
     "from": "now-1h",
@@ -40,7 +40,7 @@
         "refresh": 1,
         "multi": true,
         "includeAll": true,
-        "allValue": ".*",
+        "allValue": "",
         "current": {
           "text": "All",
           "value": "$__all"
@@ -217,7 +217,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(lasso_observer_available{job=~\"$job\",instance=~\"$node\"} * on(job,instance) up{job=~\"$job\",instance=~\"$node\"})",
+          "expr": "sum(max by(job,instance)(lasso_observer_available{job=~\"$job\",instance=~\"$node\"}) * on(job,instance) max by(job,instance)(up{job=~\"$job\",instance=~\"$node\"}))",
           "legendFormat": "{{instance}}",
           "datasource": {
             "type": "prometheus",
@@ -1099,7 +1099,7 @@
     {
       "id": 17,
       "title": "Circuit transitions — node wide",
-      "description": "Physical upstream circuit events across selected nodes. Profile/chain/provider filters do not apply; use provider_info to join instance_id when diagnosing one upstream.",
+      "description": "Physical upstream circuit events across selected nodes. Profile/chain/provider filters do not apply; use provider_info to join instance_id when diagnosing one upstream. A no_events zero appears only while the selected exporter is available and successfully scraped; absent telemetry remains No data.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -1114,7 +1114,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by(state,reason)(rate(lasso_circuit_transitions_total{job=~\"$job\",instance=~\"$node\"}[$__rate_interval]))",
+          "expr": "(sum by(state,reason)(rate(lasso_circuit_transitions_total{job=~\"$job\",instance=~\"$node\"}[$__rate_interval]))) or on() (label_replace(label_replace(0 * sum((max by(job,instance)(lasso_observer_available{job=~\"$job\",instance=~\"$node\"}) == 1) and on(job,instance) (max by(job,instance)(up{job=~\"$job\",instance=~\"$node\"}) == 1)),\"state\",\"none\",\"\",\".*\"),\"reason\",\"no_events\",\"\",\".*\"))",
           "legendFormat": "{{state}} / {{reason}}",
           "datasource": {
             "type": "prometheus",
@@ -1228,7 +1228,7 @@
     {
       "id": 23,
       "title": "Subscription recovery / loss",
-      "description": "Failover, canonical repair, orphaned events, dropped events and slow-consumer termination. Subscription IDs and filters are never metric labels.",
+      "description": "Failover, canonical repair, orphaned events, dropped events and slow-consumer termination. Subscription IDs and filters are never metric labels. A no_events zero appears only while the selected exporter is available and successfully scraped; absent telemetry remains No data.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -1243,7 +1243,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by(chain,kind)(rate(lasso_subscription_events_total{job=~\"$job\",instance=~\"$node\",chain=~\"$chain\"}[$__rate_interval]))",
+          "expr": "(sum by(chain,kind)(rate(lasso_subscription_events_total{job=~\"$job\",instance=~\"$node\",chain=~\"$chain\"}[$__rate_interval]))) or on(chain) (label_replace(0 * sum by(chain)(lasso_chain_ready{job=~\"$job\",instance=~\"$node\",chain=~\"$chain\"} and on(job,instance) ((max by(job,instance)(lasso_observer_available{job=~\"$job\",instance=~\"$node\"}) == 1) and on(job,instance) (max by(job,instance)(up{job=~\"$job\",instance=~\"$node\"}) == 1))),\"kind\",\"no_events\",\"\",\".*\"))",
           "legendFormat": "{{chain}} / {{kind}}",
           "datasource": {
             "type": "prometheus",
@@ -1286,8 +1286,8 @@
     {
       "id": 24,
       "title": "Subscription recovery p95",
-      "description": "Completed failover and reorg repair durations. Missing data means no completed repairs in the window.",
-      "type": "timeseries",
+      "description": "Completed failover and reorg repair p95. No completed repairs means the selected chain is observed by a healthy, successfully scraped exporter but no repair duration exists in the window. Missing exporters show Telemetry unavailable. The -1 sentinel is display-only, not a latency.",
+      "type": "stat",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1301,20 +1301,20 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95,sum by(le,chain,kind)(rate(lasso_subscription_recovery_duration_seconds_bucket{job=~\"$job\",instance=~\"$node\",chain=~\"$chain\"}[$__rate_interval])))",
+          "expr": "(histogram_quantile(0.95,sum by(le,chain,kind)(rate(lasso_subscription_recovery_duration_seconds_bucket{job=~\"$job\",instance=~\"$node\",chain=~\"$chain\"}[$__rate_interval]))) >= 0) or on(chain) (-1 + (0 * sum by(chain)(lasso_chain_ready{job=~\"$job\",instance=~\"$node\",chain=~\"$chain\"} and on(job,instance) ((max by(job,instance)(lasso_observer_available{job=~\"$job\",instance=~\"$node\"}) == 1) and on(job,instance) (max by(job,instance)(up{job=~\"$job\",instance=~\"$node\"}) == 1)))))",
           "legendFormat": "{{chain}} / {{kind}}",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "range": true,
-          "instant": false
+          "range": false,
+          "instant": true
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "s",
-          "noValue": "No data",
+          "noValue": "Telemetry unavailable",
           "color": {
             "mode": "palette-classic"
           },
@@ -1322,23 +1322,36 @@
             "lineWidth": 2,
             "fillOpacity": 8,
             "showPoints": "never"
-          }
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "-1": {
+                  "text": "No completed repairs",
+                  "color": "text",
+                  "index": 0
+                }
+              }
+            }
+          ]
         },
         "overrides": []
       },
       "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
           "calcs": [
-            "lastNotNull",
-            "max"
-          ]
-        }
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
       }
     },
     {
@@ -1482,7 +1495,7 @@
     {
       "id": 27,
       "title": "Stream admission losses — node wide",
-      "description": "Admission losses indicate a bounded-memory protection triggered. Inspect slow consumers and reservations before raising limits.",
+      "description": "Admission losses indicate a bounded-memory protection triggered. Inspect slow consumers and reservations before raising limits. Continuity losses show a no_events zero while the exporter is available and successfully scraped.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -1508,7 +1521,7 @@
         },
         {
           "refId": "B",
-          "expr": "sum by(instance,reason)(rate(lasso_stream_budget_rejections_total{job=~\"$job\",instance=~\"$node\"}[$__rate_interval]))",
+          "expr": "(sum by(instance,reason)(rate(lasso_stream_budget_rejections_total{job=~\"$job\",instance=~\"$node\"}[$__rate_interval]))) or on(instance) (label_replace(0 * sum by(instance)((max by(job,instance)(lasso_observer_available{job=~\"$job\",instance=~\"$node\"}) == 1) and on(job,instance) (max by(job,instance)(up{job=~\"$job\",instance=~\"$node\"}) == 1)),\"reason\",\"no_events\",\"\",\".*\"))",
           "legendFormat": "{{instance}} / continuity / {{reason}}",
           "datasource": {
             "type": "prometheus",
@@ -1967,7 +1980,7 @@
     {
       "id": 35,
       "title": "Credential health transitions — node wide",
-      "description": "Managed upstream authentication failures and recoveries over the selected window. Counts transitions, not current active alerts.",
+      "description": "Managed upstream authentication failures and recoveries over the selected window. Counts transitions, not current active alerts. A no_events zero appears only while the selected exporter is available and successfully scraped; absent telemetry remains No data.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -1982,7 +1995,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by(provider,status)(increase(lasso_credential_health_events_total{job=~\"$job\",instance=~\"$node\"}[$__range]))",
+          "expr": "(sum by(provider,status)(increase(lasso_credential_health_events_total{job=~\"$job\",instance=~\"$node\"}[$__range]))) or on() (label_replace(label_replace(0 * sum((max by(job,instance)(lasso_observer_available{job=~\"$job\",instance=~\"$node\"}) == 1) and on(job,instance) (max by(job,instance)(up{job=~\"$job\",instance=~\"$node\"}) == 1)),\"provider\",\"none\",\"\",\".*\"),\"status\",\"no_events\",\"\",\".*\"))",
           "legendFormat": "{{provider}} / {{status}}",
           "datasource": {
             "type": "prometheus",
