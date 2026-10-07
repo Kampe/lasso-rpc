@@ -207,7 +207,7 @@ unavailable failover evidence against fixture time series.
 
 
 The Job variable's All option expands only discovered Lasso jobs. The exporter
-health query deduplicates `up` by `(job, instance)` before joining, so unrelated
+health query deduplicates both availability and `up` by `(job, instance)` before joining, so unrelated
 kubelet endpoints or duplicate scrape labels cannot cause many-to-many errors.
 Sparse circuit, subscription, continuity-loss and credential event panels show
 `no_events` at zero only when their exporter is available and successfully

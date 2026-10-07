@@ -217,7 +217,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(lasso_observer_available{job=~\"$job\",instance=~\"$node\"} * on(job,instance) max by(job,instance)(up{job=~\"$job\",instance=~\"$node\"}))",
+          "expr": "sum(max by(job,instance)(lasso_observer_available{job=~\"$job\",instance=~\"$node\"}) * on(job,instance) max by(job,instance)(up{job=~\"$job\",instance=~\"$node\"}))",
           "legendFormat": "{{instance}}",
           "datasource": {
             "type": "prometheus",
@@ -1114,7 +1114,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "(sum by(state,reason)(rate(lasso_circuit_transitions_total{job=~\"$job\",instance=~\"$node\"}[$__rate_interval]))) or on() (label_replace(label_replace(0 * sum((lasso_observer_available{job=~\"$job\",instance=~\"$node\"} == 1) and on(job,instance) (max by(job,instance)(up{job=~\"$job\",instance=~\"$node\"}) == 1)),\"state\",\"none\",\"\",\".*\"),\"reason\",\"no_events\",\"\",\".*\"))",
+          "expr": "(sum by(state,reason)(rate(lasso_circuit_transitions_total{job=~\"$job\",instance=~\"$node\"}[$__rate_interval]))) or on() (label_replace(label_replace(0 * sum((max by(job,instance)(lasso_observer_available{job=~\"$job\",instance=~\"$node\"}) == 1) and on(job,instance) (max by(job,instance)(up{job=~\"$job\",instance=~\"$node\"}) == 1)),\"state\",\"none\",\"\",\".*\"),\"reason\",\"no_events\",\"\",\".*\"))",
           "legendFormat": "{{state}} / {{reason}}",
           "datasource": {
             "type": "prometheus",
@@ -1243,7 +1243,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "(sum by(chain,kind)(rate(lasso_subscription_events_total{job=~\"$job\",instance=~\"$node\",chain=~\"$chain\"}[$__rate_interval]))) or on(chain) (label_replace(0 * sum by(chain)(lasso_chain_ready{job=~\"$job\",instance=~\"$node\",chain=~\"$chain\"} and on(job,instance) ((lasso_observer_available{job=~\"$job\",instance=~\"$node\"} == 1) and on(job,instance) (max by(job,instance)(up{job=~\"$job\",instance=~\"$node\"}) == 1))),\"kind\",\"no_events\",\"\",\".*\"))",
+          "expr": "(sum by(chain,kind)(rate(lasso_subscription_events_total{job=~\"$job\",instance=~\"$node\",chain=~\"$chain\"}[$__rate_interval]))) or on(chain) (label_replace(0 * sum by(chain)(lasso_chain_ready{job=~\"$job\",instance=~\"$node\",chain=~\"$chain\"} and on(job,instance) ((max by(job,instance)(lasso_observer_available{job=~\"$job\",instance=~\"$node\"}) == 1) and on(job,instance) (max by(job,instance)(up{job=~\"$job\",instance=~\"$node\"}) == 1))),\"kind\",\"no_events\",\"\",\".*\"))",
           "legendFormat": "{{chain}} / {{kind}}",
           "datasource": {
             "type": "prometheus",
@@ -1301,7 +1301,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "(histogram_quantile(0.95,sum by(le,chain,kind)(rate(lasso_subscription_recovery_duration_seconds_bucket{job=~\"$job\",instance=~\"$node\",chain=~\"$chain\"}[$__rate_interval]))) >= 0) or on(chain) (-1 + (0 * sum by(chain)(lasso_chain_ready{job=~\"$job\",instance=~\"$node\",chain=~\"$chain\"} and on(job,instance) ((lasso_observer_available{job=~\"$job\",instance=~\"$node\"} == 1) and on(job,instance) (max by(job,instance)(up{job=~\"$job\",instance=~\"$node\"}) == 1)))))",
+          "expr": "(histogram_quantile(0.95,sum by(le,chain,kind)(rate(lasso_subscription_recovery_duration_seconds_bucket{job=~\"$job\",instance=~\"$node\",chain=~\"$chain\"}[$__rate_interval]))) >= 0) or on(chain) (-1 + (0 * sum by(chain)(lasso_chain_ready{job=~\"$job\",instance=~\"$node\",chain=~\"$chain\"} and on(job,instance) ((max by(job,instance)(lasso_observer_available{job=~\"$job\",instance=~\"$node\"}) == 1) and on(job,instance) (max by(job,instance)(up{job=~\"$job\",instance=~\"$node\"}) == 1)))))",
           "legendFormat": "{{chain}} / {{kind}}",
           "datasource": {
             "type": "prometheus",
@@ -1521,7 +1521,7 @@
         },
         {
           "refId": "B",
-          "expr": "(sum by(instance,reason)(rate(lasso_stream_budget_rejections_total{job=~\"$job\",instance=~\"$node\"}[$__rate_interval]))) or on(instance) (label_replace(0 * sum by(instance)((lasso_observer_available{job=~\"$job\",instance=~\"$node\"} == 1) and on(job,instance) (max by(job,instance)(up{job=~\"$job\",instance=~\"$node\"}) == 1)),\"reason\",\"no_events\",\"\",\".*\"))",
+          "expr": "(sum by(instance,reason)(rate(lasso_stream_budget_rejections_total{job=~\"$job\",instance=~\"$node\"}[$__rate_interval]))) or on(instance) (label_replace(0 * sum by(instance)((max by(job,instance)(lasso_observer_available{job=~\"$job\",instance=~\"$node\"}) == 1) and on(job,instance) (max by(job,instance)(up{job=~\"$job\",instance=~\"$node\"}) == 1)),\"reason\",\"no_events\",\"\",\".*\"))",
           "legendFormat": "{{instance}} / continuity / {{reason}}",
           "datasource": {
             "type": "prometheus",
@@ -1995,7 +1995,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "(sum by(provider,status)(increase(lasso_credential_health_events_total{job=~\"$job\",instance=~\"$node\"}[$__range]))) or on() (label_replace(label_replace(0 * sum((lasso_observer_available{job=~\"$job\",instance=~\"$node\"} == 1) and on(job,instance) (max by(job,instance)(up{job=~\"$job\",instance=~\"$node\"}) == 1)),\"provider\",\"none\",\"\",\".*\"),\"status\",\"no_events\",\"\",\".*\"))",
+          "expr": "(sum by(provider,status)(increase(lasso_credential_health_events_total{job=~\"$job\",instance=~\"$node\"}[$__range]))) or on() (label_replace(label_replace(0 * sum((max by(job,instance)(lasso_observer_available{job=~\"$job\",instance=~\"$node\"}) == 1) and on(job,instance) (max by(job,instance)(up{job=~\"$job\",instance=~\"$node\"}) == 1)),\"provider\",\"none\",\"\",\".*\"),\"status\",\"no_events\",\"\",\".*\"))",
           "legendFormat": "{{provider}} / {{status}}",
           "datasource": {
             "type": "prometheus",

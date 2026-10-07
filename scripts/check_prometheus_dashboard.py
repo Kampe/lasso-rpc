@@ -130,7 +130,9 @@ TESTS.extend([
         series("up", dict(job="kubelet", instance="node-b", metrics_path="/metrics"), "1+0x5"),
         series("up", dict(job="kubelet", instance="node-b", metrics_path="/metrics/cadvisor"), "1+0x5"),
     ], expression(2, job=".*"), [sample("{}", 1)]),
-    case("duplicate scrape labels count an exporter once", [AVAILABLE,
+    case("duplicate scrape labels count an exporter once", [
+        series("lasso_observer_available", EXPORTER | dict(endpoint="http"), "1+0x5"),
+        series("lasso_observer_available", EXPORTER | dict(endpoint="metrics"), "1+0x5"),
         series("up", EXPORTER | dict(endpoint="http"), "1+0x5"),
         series("up", EXPORTER | dict(endpoint="metrics"), "1+0x5"),
     ], expression(2), [sample("{}", 1)]),
