@@ -204,3 +204,18 @@ Run `python3 scripts/check_prometheus_dashboard.py /path/to/promtool` with
 Prometheus 3.5 or newer. The check parses every dashboard expression and evaluates
 route filtering, shared physical connections, pod isolation, and zero versus
 unavailable failover evidence against fixture time series.
+
+
+The Job variable's All option expands only discovered Lasso jobs. The exporter
+health query deduplicates `up` by `(job, instance)` before joining, so unrelated
+kubelet endpoints or duplicate scrape labels cannot cause many-to-many errors.
+Sparse circuit, subscription, continuity-loss and credential event panels show
+`no_events` at zero only when their exporter is available and successfully
+scraped. Subscription fallbacks also require the selected chain's inventory.
+These baselines disappear when telemetry is unavailable. Credential events can
+remain zero when no managed credential source is configured.
+
+Subscription recovery p95 is a stat with three states: a measured duration,
+`No completed repairs`, or `Telemetry unavailable`. The display-only `-1`
+sentinel identifies an observed chain without repair durations; it is never
+presented as a latency. An idle histogram follows the same rule.

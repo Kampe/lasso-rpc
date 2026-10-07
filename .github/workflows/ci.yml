@@ -7,6 +7,18 @@ on:
     branches: [main]
 
 jobs:
+  prometheus-dashboard:
+    name: Prometheus Dashboard Queries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate dashboard queries and empty states
+        run: |
+          container_id=$(docker create quay.io/prometheus/prometheus:v3.15.0-distroless)
+          docker cp "$container_id:/bin/promtool" /tmp/lasso-promtool
+          docker rm "$container_id"
+          python3 scripts/check_prometheus_dashboard.py /tmp/lasso-promtool
+
   test:
     name: Test
     runs-on: ubuntu-latest
