@@ -56,7 +56,7 @@ defmodule Lasso.Config.ConfigStoreAtomicSwapTest do
 
     on_exit(fn ->
       ConfigStore.unregister_chain_runtime("public", chain_id)
-      TestHelper.restore_config_store_state(original_state)
+      TestHelper.restore_config_store_backend(original_state)
     end)
 
     :sys.replace_state(ConfigStore, fn state ->
@@ -293,7 +293,7 @@ defmodule Lasso.Config.ConfigStoreAtomicSwapTest do
     original_specs = Application.get_env(:lasso, :config_store_invalid_chain_specs)
 
     on_exit(fn ->
-      TestHelper.restore_config_store_state(original_state)
+      TestHelper.restore_config_store_backend(original_state)
       Application.put_env(:lasso, :config_store_invalid_chain_specs, original_specs)
     end)
 
@@ -329,12 +329,26 @@ defmodule Lasso.Config.ConfigStoreAtomicSwapTest do
              ConfigStore.lookup_chain_id_in_profile(first.profile_id, "shared-alias")
   end
 
+  test "restoring a backend fixture does not resurrect completed runtime reconciliation" do
+    original_state = :sys.get_state(ConfigStore)
+    on_exit(fn -> TestHelper.restore_config_store_backend(original_state) end)
+
+    completed_timer = Process.send_after(ConfigStore, :retry_runtime_reconcile, 30_000)
+    Process.cancel_timer(completed_timer)
+    stale_snapshot = %{original_state | runtime_reconcile_timer: completed_timer}
+
+    restored = TestHelper.restore_config_store_backend(stale_snapshot)
+
+    refute restored.runtime_reconcile_timer == completed_timer
+    assert restored.backend_module == original_state.backend_module
+  end
+
   test "restoring a backend fixture cancels its scheduled reload retry" do
     original_state = :sys.get_state(ConfigStore)
     original_specs = Application.get_env(:lasso, :config_store_invalid_chain_specs)
 
     on_exit(fn ->
-      TestHelper.restore_config_store_state(original_state)
+      TestHelper.restore_config_store_backend(original_state)
       Application.put_env(:lasso, :config_store_invalid_chain_specs, original_specs)
     end)
 
@@ -353,7 +367,7 @@ defmodule Lasso.Config.ConfigStoreAtomicSwapTest do
     assert is_reference(retry_timer)
     assert is_integer(Process.read_timer(retry_timer))
 
-    TestHelper.restore_config_store_state(original_state)
+    TestHelper.restore_config_store_backend(original_state)
 
     assert Process.read_timer(retry_timer) == false
     assert :sys.get_state(ConfigStore).retry_timer == original_state.retry_timer
@@ -364,7 +378,7 @@ defmodule Lasso.Config.ConfigStoreAtomicSwapTest do
     original_specs = Application.get_env(:lasso, :config_store_invalid_chain_specs)
 
     on_exit(fn ->
-      TestHelper.restore_config_store_state(original_state)
+      TestHelper.restore_config_store_backend(original_state)
       Application.put_env(:lasso, :config_store_invalid_chain_specs, original_specs)
     end)
 
