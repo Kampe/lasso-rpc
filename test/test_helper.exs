@@ -73,6 +73,16 @@ defmodule TestHelper do
   Helper functions for test setup and cleanup.
   """
 
+  def restore_config_store_state(original_state) do
+    :sys.replace_state(Lasso.Config.ConfigStore, fn state ->
+      if state.retry_timer && state.retry_timer != original_state.retry_timer do
+        Process.cancel_timer(state.retry_timer)
+      end
+
+      original_state
+    end)
+  end
+
   def ensure_clean_state() do
     # Clean benchmark store if it's running
     try do

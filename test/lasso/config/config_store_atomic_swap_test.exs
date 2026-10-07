@@ -56,7 +56,7 @@ defmodule Lasso.Config.ConfigStoreAtomicSwapTest do
 
     on_exit(fn ->
       ConfigStore.unregister_chain_runtime("public", chain_id)
-      :sys.replace_state(ConfigStore, fn _ -> original_state end)
+      TestHelper.restore_config_store_state(original_state)
     end)
 
     :sys.replace_state(ConfigStore, fn state ->
@@ -293,7 +293,7 @@ defmodule Lasso.Config.ConfigStoreAtomicSwapTest do
     original_specs = Application.get_env(:lasso, :config_store_invalid_chain_specs)
 
     on_exit(fn ->
-      :sys.replace_state(ConfigStore, fn _ -> original_state end)
+      TestHelper.restore_config_store_state(original_state)
       Application.put_env(:lasso, :config_store_invalid_chain_specs, original_specs)
     end)
 
@@ -329,12 +329,42 @@ defmodule Lasso.Config.ConfigStoreAtomicSwapTest do
              ConfigStore.lookup_chain_id_in_profile(first.profile_id, "shared-alias")
   end
 
+  test "restoring a backend fixture cancels its scheduled reload retry" do
+    original_state = :sys.get_state(ConfigStore)
+    original_specs = Application.get_env(:lasso, :config_store_invalid_chain_specs)
+
+    on_exit(fn ->
+      TestHelper.restore_config_store_state(original_state)
+      Application.put_env(:lasso, :config_store_invalid_chain_specs, original_specs)
+    end)
+
+    Application.put_env(:lasso, :config_store_invalid_chain_specs, [invalid_spec(nil)])
+
+    :sys.replace_state(ConfigStore, fn state ->
+      %{
+        state
+        | backend_module: Lasso.Config.ConfigStoreAtomicSwapTest.InvalidChainBackend,
+          backend_state: nil
+      }
+    end)
+
+    assert {:error, :invalid_chain_id} = ConfigStore.reload()
+    retry_timer = :sys.get_state(ConfigStore).retry_timer
+    assert is_reference(retry_timer)
+    assert is_integer(Process.read_timer(retry_timer))
+
+    TestHelper.restore_config_store_state(original_state)
+
+    assert Process.read_timer(retry_timer) == false
+    assert :sys.get_state(ConfigStore).retry_timer == original_state.retry_timer
+  end
+
   test "invalid chain IDs leave the last good snapshot active" do
     original_state = :sys.get_state(ConfigStore)
     original_specs = Application.get_env(:lasso, :config_store_invalid_chain_specs)
 
     on_exit(fn ->
-      :sys.replace_state(ConfigStore, fn _ -> original_state end)
+      TestHelper.restore_config_store_state(original_state)
       Application.put_env(:lasso, :config_store_invalid_chain_specs, original_specs)
     end)
 
