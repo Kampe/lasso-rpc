@@ -187,6 +187,21 @@ defmodule Lasso.Providers.InstanceStateTest do
   end
 
   describe "read_rate_limit/3 direct routing state" do
+    test "a cleared observed cooldown does not block a healthy HTTP candidate" do
+      put_circuit_snapshot(:closed)
+
+      routing_state = %{
+        rate_limit_expiry_ms: 0,
+        rate_limit_observed_at_us: System.monotonic_time(:microsecond)
+      }
+
+      assert %{rate_limited: false, expiry_ms: nil} =
+               InstanceState.read_rate_limit(@instance_id, :http, routing_state: routing_state)
+
+      assert {:closed, false} =
+               InstanceState.read_candidate_gate(@instance_id, :http, routing_state, true)
+    end
+
     test "ignores an expiry without a rate-limit observation" do
       routing_state = %{
         rate_limit_expiry_ms: System.monotonic_time(:millisecond) + 10_000,

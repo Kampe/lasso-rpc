@@ -956,11 +956,11 @@ defmodule Lasso.RPC.AttemptProjection do
   defp apply_shared_admission(row, %{kind: :rate_limit, retry_after_ms: retry_after_ms} = delta) do
     observed_at_us = Map.fetch!(delta, :observed_at_us)
     expiry_ms = div(observed_at_us, 1_000) + retry_after_ms
-    replace_expiry? = expiry_ms >= row.rate_limit_expiry_ms
+    replace_expiry? = row.rate_limit_expiry_ms == 0 or expiry_ms >= row.rate_limit_expiry_ms
 
     %{
       row
-      | rate_limit_expiry_ms: max(row.rate_limit_expiry_ms, expiry_ms),
+      | rate_limit_expiry_ms: if(replace_expiry?, do: expiry_ms, else: row.rate_limit_expiry_ms),
         rate_limit_retry_after_ms:
           if(replace_expiry?, do: retry_after_ms, else: row.rate_limit_retry_after_ms),
         rate_limit_observed_at_us: max_floor(row.rate_limit_observed_at_us, observed_at_us)
@@ -1012,11 +1012,11 @@ defmodule Lasso.RPC.AttemptProjection do
   defp apply_aggregate(row, %{kind: :rate_limit, retry_after_ms: retry_after_ms} = delta) do
     observed_at_us = Map.fetch!(delta, :observed_at_us)
     expiry_ms = div(observed_at_us, 1_000) + retry_after_ms
-    replace_expiry? = expiry_ms >= row.rate_limit_expiry_ms
+    replace_expiry? = row.rate_limit_expiry_ms == 0 or expiry_ms >= row.rate_limit_expiry_ms
 
     updated = %{
       row
-      | rate_limit_expiry_ms: max(row.rate_limit_expiry_ms, expiry_ms),
+      | rate_limit_expiry_ms: if(replace_expiry?, do: expiry_ms, else: row.rate_limit_expiry_ms),
         rate_limit_retry_after_ms:
           if(replace_expiry?, do: retry_after_ms, else: row.rate_limit_retry_after_ms),
         rate_limit_observed_at_us: max_floor(row.rate_limit_observed_at_us, observed_at_us),
