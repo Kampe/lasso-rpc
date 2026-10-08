@@ -63,6 +63,55 @@ defmodule Lasso.RPC.ArchiveProviderDiversityTest do
     end
   end
 
+  test "dual-transport and HTTP-only instances receive equal first dispatch shares" do
+    {chain, _snapshot, plan} = fixture([{"dual", true, [:http, :ws]}, {"single", true, [:http]}])
+
+    for provider <- plan.providers, transport <- provider.transports do
+      key = {"premium", chain, provider.id, transport}
+      [{^key, channel}] = :ets.lookup(:transport_channel_cache, key)
+
+      :ets.insert(
+        :transport_channel_cache,
+        {key, %{channel | raw_channel: Map.put(channel.raw_channel, :succeed?, true)}}
+      )
+    end
+
+    :rand.seed(:exsss, {1878, 264, 4663})
+
+    counts =
+      for _ <- 1..1200, reduce: %{} do
+        counts ->
+          assert {:ok, _, context} = execute(chain, [], :both)
+          assert context.execution_envelope.dispatch_count == 1
+          [{provider, _}] = dispatched(1)
+          assert context.executed_channel.provider_id == provider
+          Map.update(counts, provider, 1, &(&1 + 1))
+      end
+
+    assert counts["dual"] in 504..696
+    assert counts["single"] in 504..696
+
+    for method <- ["eth_getBalance", "eth_sendRawTransaction"] do
+      :rand.seed(:exsss, {1878, 264, 4663})
+
+      counts =
+        for _ <- 1..1200, reduce: %{} do
+          counts ->
+            [first | rest] =
+              Selection.select_channels("premium", chain, method,
+                strategy: :load_balanced,
+                transport: :both
+              )
+
+            assert length(rest) == 2
+            Map.update(counts, first.provider_id, 1, &(&1 + 1))
+        end
+
+      assert counts["dual"] in 504..696
+      assert counts["single"] in 504..696
+    end
+  end
+
   test "distinct archive providers get a first pass before sibling transports consume the budget" do
     {chain, snapshot, plan} =
       fixture([
@@ -180,10 +229,9 @@ defmodule Lasso.RPC.ArchiveProviderDiversityTest do
           "eth_getFilterChanges",
           "unknown_method"
         ] do
-      :rand.seed(:exsss, {2, 3, 4})
-      expected = Enum.shuffle(input)
-      :rand.seed(:exsss, {2, 3, 4})
-      assert LoadBalanced.rank_channels(input, method, nil, "public", 1) == expected
+      ranked = LoadBalanced.rank_channels(input, method, nil, "public", 1)
+      assert MapSet.new(ranked) == MapSet.new(input)
+      assert LoadBalanced.order_fallbacks(ranked, method) == ranked
       assert ExecutionEnvelope.new("safety", method, 2_000).dispatch_limit == 1
     end
   end
@@ -376,7 +424,7 @@ defmodule Lasso.RPC.ArchiveProviderDiversityTest do
 
     {seed, _} =
       find_order(snapshot, plan, [], :both, fn order ->
-        order == [{"bad-a", :http}, {"bad-b", :http}, {"bad-a", :ws}, {"capable", :http}]
+        order == [{"bad-a", :http}, {"bad-a", :ws}, {"bad-b", :http}, {"capable", :http}]
       end)
 
     expected = [{"bad-a", :http}, {"bad-b", :http}, {"capable", :http}, {"bad-a", :ws}]
@@ -474,7 +522,7 @@ defmodule Lasso.RPC.ArchiveProviderDiversityTest do
 
     {seed, _} =
       find_order(snapshot, plan, [], :both, fn order ->
-        order == [{"bad-a", :ws}, {"capable", :http}, {"bad-a", :http}]
+        order == [{"bad-a", :ws}, {"bad-a", :http}, {"capable", :http}]
       end)
 
     :rand.seed(:exsss, {seed, seed + 1, seed + 2})
