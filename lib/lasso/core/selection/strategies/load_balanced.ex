@@ -31,10 +31,12 @@ defmodule Lasso.RPC.Strategies.LoadBalanced do
     shuffle_channels(channels)
   end
 
-  @doc false
+  @doc "Randomizes physical instances before their sibling channel transports."
+  @spec shuffle_channels([Channel.t()]) :: [Channel.t()]
   def shuffle_channels(channels), do: shuffle_instances(channels, &instance_key/1)
 
-  @doc false
+  @doc "Shuffles route groups by the supplied physical-instance identity, then their siblings."
+  @spec shuffle_instances([route], (route -> term())) :: [route] when route: term()
   def shuffle_instances(routes, instance_key) do
     routes
     |> Enum.group_by(instance_key)
