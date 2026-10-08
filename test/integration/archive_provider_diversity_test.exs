@@ -293,7 +293,9 @@ defmodule Lasso.RPC.ArchiveProviderDiversityTest do
 
     {seed, _} =
       find_order(snapshot, plan, params, :both, fn order ->
-        hd(order) == {"capable", :ws} and Enum.find_index(order, &(&1 == {"capable", :http})) >= 3
+        hd(order) == {"bad-a", :http} and
+          Enum.at(order, 2) == {"bad-b", :http} and
+          Enum.at(order, 4) == {"capable", :ws}
       end)
 
     :rand.seed(:exsss, {seed, seed + 1, seed + 2})

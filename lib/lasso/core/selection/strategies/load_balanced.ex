@@ -28,8 +28,11 @@ defmodule Lasso.RPC.Strategies.LoadBalanced do
 
   @impl true
   def rank_channels(channels, _method, _ctx, _profile, _chain) do
-    shuffle_instances(channels, &instance_key/1)
+    shuffle_channels(channels)
   end
+
+  @doc false
+  def shuffle_channels(channels), do: shuffle_instances(channels, &instance_key/1)
 
   @doc false
   def shuffle_instances(routes, instance_key) do

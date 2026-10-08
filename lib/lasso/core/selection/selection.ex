@@ -732,7 +732,7 @@ defmodule Lasso.RPC.Selection do
          _workload_key,
          LoadBalanced
        ),
-       do: Enum.shuffle(channels)
+       do: LoadBalanced.shuffle_channels(channels)
 
   defp rank_capable_channels(
          channels,
