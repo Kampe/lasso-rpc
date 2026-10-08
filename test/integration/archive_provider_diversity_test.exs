@@ -67,7 +67,7 @@ defmodule Lasso.RPC.ArchiveProviderDiversityTest do
     {chain, _snapshot, plan} = fixture([{"dual", true, [:http, :ws]}, {"single", true, [:http]}])
 
     for provider <- plan.providers, transport <- provider.transports do
-      key = {"premium", chain, provider.id, transport}
+      key = {"public", chain, provider.id, transport}
       [{^key, channel}] = :ets.lookup(:transport_channel_cache, key)
 
       :ets.insert(
@@ -98,7 +98,7 @@ defmodule Lasso.RPC.ArchiveProviderDiversityTest do
         for _ <- 1..1200, reduce: %{} do
           counts ->
             [first | rest] =
-              Selection.select_channels("premium", chain, method,
+              Selection.select_channels("public", chain, method,
                 strategy: :load_balanced,
                 transport: :both
               )
