@@ -7,8 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The `latency-weighted` strategy is now `balanced-fast`, positioned between `load-balanced` and `fastest`. `latency-weighted` stays a permanent alias in HTTP and WebSocket URLs and the `strategy` query parameter, and routes identically. `lasso_meta.strategy` and request logs report `balanced_fast`, and the dashboard shows Balanced Fast. The module is `Lasso.RPC.Strategies.BalancedFast`, and its exponent is set with `BALANCED_FAST_BETA` (application key `:balanced_fast_beta`); `LW_BETA` is no longer read.
+
 ### Fixed
 
+- `balanced-fast` no longer fails a request when a provider's mean successful latency reads 0. Weighting treats a zero mean as unmeasured, as qualification already does.
 - Concurrent first observations of a request series share one `lasso_rpc_requests_total` row instead of splitting into duplicate samples. Route totals are documented as exact while their routing scope stays published.
 - Exporter failures stay inside the exporter: a raising `MetricsScope` hook drops the observation and is counted, route-total reads keep their previous values, and telemetry handlers stay attached. Route totals count successes and errors separately, so neither moves backwards under concurrency, and are limited to 2,048 series per node.
 
