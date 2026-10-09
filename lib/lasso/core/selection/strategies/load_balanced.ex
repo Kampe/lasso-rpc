@@ -27,8 +27,8 @@ defmodule Lasso.RPC.Strategies.LoadBalanced do
   end
 
   @impl true
-  def rank_channels(channels, _method, _ctx, _profile, _chain) do
-    shuffle_channels(channels)
+  def rank_channels(channels, method, _ctx, _profile, _chain) do
+    channels |> shuffle_channels() |> order_fallbacks(method)
   end
 
   @doc "Randomizes physical instances before their sibling channel transports."
