@@ -33,14 +33,16 @@ underscore, such as `load_balanced` or `balanced_fast`. URLs use the hyphenated 
 **URL**: `/rpc/load-balanced/:chain`
 **Module**: `Lasso.RPC.Strategies.LoadBalanced`
 
-Starts from a randomized candidate order. For replay-safe unary reads, fallback
+Randomizes physical provider instances first, then the transports within each
+instance. An upstream offering both HTTP and WebSocket receives one first-pick
+share. For replay-safe unary reads, fallback
 tries distinct physical provider instances before sibling transports within each
 availability tier. Alternate transports remain available; a healthy alternate
 still precedes a different provider in a lower availability tier. The lazy cursor
 bounds healthy-sibling deferral by its remaining candidate limit, and explicit
 recovered-head preference takes precedence over diversity.
 
-Unsafe or unknown methods retain their shuffled order and existing replay limits.
+Unsafe or unknown methods retain the instance-shuffled order and existing replay limits.
 This ordering does not increase the three-dispatch budget or deadline, infer
 archive capabilities, or guarantee successful historical reads. A hash selector
 can leave more distinct providers eligible than the budget can cover. Trying
