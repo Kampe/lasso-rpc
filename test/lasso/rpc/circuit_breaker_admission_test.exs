@@ -132,7 +132,13 @@ defmodule Lasso.RPC.CircuitBreakerAdmissionTest do
     assert {:error, :circuit_open} = Admission.check(id, deadline_us)
   end
 
-  test "missing, unready, and dead-owner snapshots fail closed", %{id: id} do
+  test "missing, unready, and dead-owner snapshots fail closed", %{
+    id: id,
+    breaker_pid: breaker_pid
+  } do
+    on_exit(fn -> if Process.alive?(breaker_pid), do: :sys.resume(breaker_pid) end)
+    :sys.suspend(breaker_pid)
+
     :ets.delete(Storage.snapshot_table(), id)
     assert {:error, :admission_unavailable} = Admission.check(id, deadline_us())
 
