@@ -56,11 +56,16 @@ defmodule Lasso.Config.ObservationPolicyReloadTest do
     {:ok, _} = Plug.Cowboy.http(Upstream, [chain_id: chain_id, polls: polls], ref: ref, port: 0)
     url = "http://127.0.0.1:#{:ranch.get_port(ref)}"
 
-    original_state = :sys.get_state(ConfigStore)
+    %{backend_module: original_backend_module, backend_state: original_backend_state} =
+      :sys.get_state(ConfigStore)
+
     original_client = Application.get_env(:lasso, :http_client)
 
     on_exit(fn ->
-      :sys.replace_state(ConfigStore, fn _ -> original_state end)
+      :sys.replace_state(ConfigStore, fn state ->
+        %{state | backend_module: original_backend_module, backend_state: original_backend_state}
+      end)
+
       ConfigStore.reload()
       Application.put_env(:lasso, :http_client, original_client)
       Plug.Cowboy.shutdown(ref)

@@ -88,11 +88,16 @@ defmodule Lasso.RPC.HeadEvidenceReloadTest do
         {provider, {ref, :ranch.get_port(ref)}}
       end)
 
-    original_state = :sys.get_state(ConfigStore)
+    %{backend_module: original_backend_module, backend_state: original_backend_state} =
+      :sys.get_state(ConfigStore)
+
     original_client = Application.get_env(:lasso, :http_client)
 
     on_exit(fn ->
-      :sys.replace_state(ConfigStore, fn _ -> original_state end)
+      :sys.replace_state(ConfigStore, fn state ->
+        %{state | backend_module: original_backend_module, backend_state: original_backend_state}
+      end)
+
       ConfigStore.reload()
       Registry.clear_chain(chain_id)
       Application.put_env(:lasso, :http_client, original_client)
